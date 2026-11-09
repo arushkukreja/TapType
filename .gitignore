@@ -1,0 +1,8 @@
+DerivedData/
+*.xcuserstate
+xcuserdata/
+.DS_Store
+/.build/
+/work/
+/outputs/*.zip
+
