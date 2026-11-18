@@ -1,0 +1,7 @@
+// Copy this file to Config/Local.xcconfig and fill in your own values.
+
+// Your Apple Developer Team ID (Xcode > Settings > Accounts, or developer.apple.com)
+DEVELOPMENT_TEAM = YOURTEAMID
+
+// A bundle ID you own. The App Group becomes group.<this value>.
+TAPTYPE_BUNDLE_ID = com.yourname.TapType

@@ -6,3 +6,6 @@ xcuserdata/
 /work/
 /outputs/*.zip
 
+
+# Personal signing settings
+Config/Local.xcconfig

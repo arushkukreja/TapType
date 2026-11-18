@@ -1,0 +1,8 @@
+// Signing defaults for TapType.
+// To build on your own device, copy Local.example.xcconfig to Local.xcconfig
+// in this folder and fill in your values. Local.xcconfig is gitignored.
+
+TAPTYPE_BUNDLE_ID = com.example.TapType
+DEVELOPMENT_TEAM =
+
+#include? "Local.xcconfig"

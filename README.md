@@ -89,17 +89,15 @@ guarantees. Details are in [STREAMING-PERFORMANCE.md](outputs/STREAMING-PERFORMA
 
 ## Build and install
 
-1. Clone the repository and open `TapType.xcodeproj`.
-2. In the project settings, set your own `DEVELOPMENT_TEAM` and `TAPTYPE_BUNDLE_ID`.
-3. Register an App Group for your bundle ID and update the App Group in
-   `TapType/Shared.entitlements` to match `TAPTYPE_APP_GROUP`.
-4. Select the `TapType` scheme and run on a physical iPhone.
+1. Clone the repository.
+2. Copy `Config/Local.example.xcconfig` to `Config/Local.xcconfig` and set your
+   Apple Developer Team ID and a bundle ID you own. This file is gitignored.
+3. Register an App Group named `group.<your bundle ID>` in your Apple Developer
+   account (or let Xcode's automatic signing create it).
+4. Open `TapType.xcodeproj`, select the `TapType` scheme, and run on a physical
+   iPhone.
 5. On your iPhone, go to **Settings → General → Keyboard → Keyboards → Add New
    Keyboard**, add TapType, and turn on **Allow Full Access**.
-
-The committed project contains the original developer's Team ID, bundle ID, and
-App Group. These are identifiers, not signing credentials. Replace them with
-your own.
 
 ## Known limitations
 

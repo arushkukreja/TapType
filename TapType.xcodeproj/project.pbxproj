@@ -109,6 +109,7 @@ AA3000000000000000000003 = {isa = PBXBuildFile; productRef = AA30000000000000000
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		E90000000000000000000001 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Signing.xcconfig; sourceTree = "<group>"; };
 		A20000000000000000000001 /* TapTypeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TapTypeApp.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* SpeechRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechRecognizer.swift; sourceTree = "<group>"; };
@@ -146,6 +147,7 @@ AA3000000000000000000003,
 		A40000000000000000000001 = {
 			isa = PBXGroup;
 			children = (
+                E90000000000000000000001 /* Signing.xcconfig */,
                 D10000000000000000000001,
                 E10000000000000000000001,
                 F10000000000000000000001,
@@ -299,7 +301,6 @@ AA2000000000000000000005,
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = "";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = ;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = TapType/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
@@ -322,7 +323,6 @@ AA2000000000000000000005,
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = "";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = ;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = TapType/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
@@ -340,11 +340,10 @@ AA2000000000000000000005,
 		};
 		A80000000000000000000003 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = E90000000000000000000001 /* Signing.xcconfig */;
 			buildSettings = {
-                TAPTYPE_BUNDLE_ID = com.arushkukreja.TapTypeDev;
                 TAPTYPE_DISPLAY_NAME = TapType;
 				CURRENT_PROJECT_VERSION = 57;
-				DEVELOPMENT_TEAM = ;
                 TAPTYPE_APP_GROUP = "group.$(TAPTYPE_BUNDLE_ID)";
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -403,11 +402,10 @@ AA2000000000000000000005,
 		};
 		A80000000000000000000004 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = E90000000000000000000001 /* Signing.xcconfig */;
 			buildSettings = {
-                TAPTYPE_BUNDLE_ID = com.arushkukreja.TapTypeDev;
                 TAPTYPE_DISPLAY_NAME = TapType;
 				CURRENT_PROJECT_VERSION = 57;
-				DEVELOPMENT_TEAM = ;
                 TAPTYPE_APP_GROUP = "group.$(TAPTYPE_BUNDLE_ID)";
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
