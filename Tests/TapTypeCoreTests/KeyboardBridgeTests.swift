@@ -69,3 +69,15 @@ final class HostReturnCacheTests: XCTestCase {
         XCTAssertEqual(cache.count, 1)
     }
 }
+
+final class TranscriptEchoReducerTests: XCTestCase {
+    func testRemovesOnlyAnImmediateWhisperEcho() {
+        XCTAssertEqual(TranscriptEchoReducer.removingLeadingEcho(from: "from yesterday I can help", after: "Hey Sarah, from yesterday"), "I can help")
+        XCTAssertEqual(TranscriptEchoReducer.removingImmediateEchoes(from: "The proposal from yesterday proposal from yesterday is ready"), "The proposal from yesterday is ready")
+    }
+
+    func testKeepsSeparateRepeatedDictation() {
+        XCTAssertEqual(TranscriptEchoReducer.removingImmediateEchoes(from: "Yes. Then later, yes."), "Yes. Then later, yes.")
+        XCTAssertEqual(TranscriptEchoReducer.removingImmediateEchoes(from: "No, no, that is not right."), "No, no, that is not right.")
+    }
+}

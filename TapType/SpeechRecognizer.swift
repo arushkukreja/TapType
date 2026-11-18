@@ -81,6 +81,12 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     }
     @objc private func backgrounded(_ notification: Notification) { appDidEnterBackground() }
     func appDidEnterBackground() {
+        // A return handoff can background the app before its deferred cleanup
+        // runs. "Off" must still release an idle input engine immediately.
+        if readinessMinutes == 0, !isRecording, !isStarting {
+            releaseMicrophone(keepPolling: isProcessing); publish()
+            return
+        }
         guard !isRecording, !isProcessing, !isStarting, !handoffPending else { return }
         if readinessMinutes != 0 && engine.isRunning && readiness.isOpen(now: uptime) { return }
         releaseMicrophone(); publish()
