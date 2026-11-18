@@ -200,15 +200,20 @@ actor PhraseSpeechService: StreamingSpeech {
         }
         consumer = Task {
             do {
+                var priorTranscript = ""
                 for await (clip, start, end) in pair.stream {
                     try Task.checkCancellation()
                     let samples = try clip.mono16k()
-                    let value: String
-                    if let selection { value = try await CloudModels.transcribe(samples, selection: selection) }
-                    else { value = try await ModelStore.shared.transcribe(samples, model: provider.rawValue, keepLoaded: true) }
+                    let decoded: String
+                    if let selection { decoded = try await CloudModels.transcribe(samples, selection: selection) }
+                    else { decoded = try await ModelStore.shared.transcribe(samples, model: provider.rawValue, keepLoaded: true) }
                     try Task.checkCancellation()
+                    let value = selection == nil
+                        ? TranscriptEchoReducer.removingImmediateEchoes(from: TranscriptEchoReducer.removingLeadingEcho(from: decoded, after: priorTranscript))
+                        : decoded
                     // A VAD false positive can decode to silence; it must not end a long dictation.
                     guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                    if selection == nil { priorTranscript = value }
                     await text.receive(.init(start: start, end: end, text: value, isFinal: true))
                     await text.silence(through: end)
                 }

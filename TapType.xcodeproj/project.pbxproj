@@ -343,7 +343,7 @@ AA2000000000000000000005,
 			baseConfigurationReference = E90000000000000000000001 /* Signing.xcconfig */;
 			buildSettings = {
                 TAPTYPE_DISPLAY_NAME = TapType;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 59;
                 TAPTYPE_APP_GROUP = "group.$(TAPTYPE_BUNDLE_ID)";
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -405,7 +405,7 @@ AA2000000000000000000005,
 			baseConfigurationReference = E90000000000000000000001 /* Signing.xcconfig */;
 			buildSettings = {
                 TAPTYPE_DISPLAY_NAME = TapType;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 59;
                 TAPTYPE_APP_GROUP = "group.$(TAPTYPE_BUNDLE_ID)";
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;

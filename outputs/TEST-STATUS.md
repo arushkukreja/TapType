@@ -1,3 +1,13 @@
+# Build 59 — microphone lifecycle, local-Whisper echo, and loading recovery (November 11, 2026)
+
+- The paired iPhone's saved setting was **Keep ready: Off** (`readinessMinutes = 0`), but a keyboard return could background the companion while a handoff was pending and bypass the existing idle-engine cleanup. With Off selected, backgrounding now releases an idle microphone even during that handoff. An active dictation continues through a return handoff until the user finishes or cancels it.
+- Local Whisper Base output in the phone's history contains immediate model echoes (for example, repeated adjacent phrases). Local phrase results now remove only an immediate echoed suffix/prefix before they reach the transcript state, insertion, or history. Cloud and Apple Speech paths are unchanged. Two focused tests cover echoed phrase removal and a separate intentional repetition.
+- A handoff that remains foreground after two seconds now clears its transition shield and opens the companion home instead of leaving the logo/loading screen indefinitely. A backgrounded handoff remains covered so it cannot flash TapType over the originating app.
+- The physical device currently has exactly 49 readable transcript JSON files in TapType's private container. There are no corrupt or hidden history files in that container, and the source exposes no history deletion UI. Earlier records that were not present in this container cannot be recovered from this install; transcript history is intentionally local and excluded from device backup.
+- Eight Swift package tests pass. Generic iPhone Debug and Release builds pass. A fresh signed Debug build was installed in place on the iPhone 15 Pro and launches as build 59; this preserves the current app container and settings.
+
+Pending physical confirmation: with Keep ready set to Off, perform one dictation and tap ✓, then one and tap ×; the orange privacy indicator should turn off after each. Also dictate a sentence with a deliberate short pause using Whisper Base to validate no model echo reaches the destination app. The iOS 27.2 Simulator remains unavailable for equivalent-version testing.
+
 # Build 57 — OpenAI quiet-speech upload fix (November 9, 2026)
 
 - The latest three-word history entry came from a 16.63-second completed dictation,

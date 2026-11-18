@@ -199,10 +199,11 @@ struct ContentView: View {
     }
 
     private func finishHandoffScreen() async {
-        // Completion of openURL is not completion of iOS's transition. Never
-        // reveal the home screen on a timer; only a later ordinary activation
-        // or an explicit user action may reveal it.
+        // Completion of openURL is not completion of iOS's transition. Give
+        // iOS time to return first, then never leave a foreground app covered.
         try? await Task.sleep(for: .seconds(2))
-        if scenePhase != .background && TransitionShield.shared.handoffPending { handoffHelp = true }
+        guard scenePhase != .background, TransitionShield.shared.handoffPending else { return }
+        TransitionShield.shared.allowExplicitHome()
+        handoffInProgress = false; handoffHelp = false; showHandoff = false
     }
 }

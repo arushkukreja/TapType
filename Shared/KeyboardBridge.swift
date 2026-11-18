@@ -186,3 +186,47 @@ enum ReadySessionOptions {
         value == 0 ? "Off" : value == -1 ? "Until I end it" : "\(value) \(value == 1 ? "minute" : "minutes")"
     }
 }
+
+// Whisper's short, independent phrase decodes can occasionally repeat the end
+// of one decode at the beginning of the next. Remove only an immediate echo;
+// separate, deliberately repeated dictation remains untouched.
+enum TranscriptEchoReducer {
+    private static func normalized(_ word: Substring) -> String {
+        word.lowercased().trimmingCharacters(in: .punctuationCharacters)
+    }
+
+    static func removingLeadingEcho(from text: String, after previous: String) -> String {
+        let incoming = text.split(whereSeparator: \.isWhitespace)
+        let prior = previous.split(whereSeparator: \.isWhitespace)
+        guard !incoming.isEmpty, !prior.isEmpty else { return text }
+        let limit = min(12, incoming.count, prior.count)
+        for count in stride(from: limit, through: 2, by: -1) {
+            let tail = prior.suffix(count).map(normalized)
+            let head = incoming.prefix(count).map(normalized)
+            guard !tail.contains(""), tail == head else { continue }
+            return incoming.dropFirst(count).joined(separator: " ")
+        }
+        return text
+    }
+
+    static func removingImmediateEchoes(from text: String) -> String {
+        let words = text.split(whereSeparator: \.isWhitespace)
+        guard words.count > 1 else { return text }
+        var result: [Substring] = []
+        var index = 0
+        while index < words.count {
+            let limit = min(12, result.count, words.count - index)
+            var echoed = 0
+            if limit >= 2 {
+                for count in stride(from: limit, through: 2, by: -1) {
+                    let tail = result.suffix(count).map(normalized)
+                    let head = words[index..<(index + count)].map(normalized)
+                    if !tail.contains(""), tail == head { echoed = count; break }
+                }
+            }
+            if echoed > 0 { index += echoed }
+            else { result.append(words[index]); index += 1 }
+        }
+        return result.joined(separator: " ")
+    }
+}
