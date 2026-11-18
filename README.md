@@ -154,6 +154,6 @@ Groq, Wispr Flow, Granola, or Handy.
 
 ## License
 
-No license has been selected yet. The code is public to view, but that doesn't
-grant permission to copy, modify, or redistribute it. Third-party components
-are covered by their own licenses.
+TapType is released under the [MIT License](LICENSE). Third-party components
+are covered by their own licenses, listed in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) and `TapType/Licenses.txt`.
