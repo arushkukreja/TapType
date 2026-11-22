@@ -282,6 +282,9 @@ actor PhraseCleanupService {
         await cleaner.reset(); await publish(state.snapshot)
     }
     func snapshot() -> DictationTextSnapshot { state.snapshot }
+    #if DEBUG
+    func phrasesForDebugging() -> [CleanupPhrase] { state.phrases }
+    #endif
 }
 
 actor CloudPhraseCleaner: PhraseCleaning {

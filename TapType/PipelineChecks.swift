@@ -38,6 +38,15 @@ enum PipelineChecks {
         check(!LocalTextProcessor.plausible("We should launch at three.", original: "Maybe we should launch around three.", mode: .rewrite), "rewrite_rejects_dropped_hedges")
         let combined = "Do not confirm a date until the supplier replies. I will prepare a short follow-up message for the team. There is no need to change the product name. At the end, please preserve the original meaning and finish the sentence clearly. The purple bicycle is still parked beside the yellow house."
         check(!LocalTextProcessor.plausible("Do not confirm a date until the supplier replies. I will prepare a short follow-up message for the team. There is no need to change the product name. At the end, please. The purple bicycle is still parked beside the yellow house.", original: combined), "cleanup_rejects_clause_dropped_inside_batch")
+        let runOn = "This recording is still being spoken, at the end, please preserve the original meaning and finish the sentence clearly, the purple bicycle is still parked beside the yellow house, so we can check that the text stays in order."
+        check(!LocalTextProcessor.plausible("This recording is still being spoken, at the end, please preserve the original meaning, and the purple bicycle is still parked beside the yellow house, so we can check that the text stays in order.", original: runOn), "cleanup_rejects_clause_dropped_from_run_on")
+        check(!LocalTextProcessor.plausible("The next sentence is being spoken, please preserve the meaning, and the bicycle is parked.", original: "The next sentence is being spoken, please preserve the meaning and finish the sentence clearly, the bicycle is parked."), "cleanup_counts_repeated_words_when_dropped")
+        var spansAcross = StreamingTextState()
+        spansAcross.receive(.init(start: 0, end: 8, text: "The bike is outside. Please send three copies to Maya before the", isFinal: true))
+        check(spansAcross.phrases.map(\.raw) == ["The bike is outside."], "finished_sentence_cleaned_before_span_ends")
+        spansAcross.receive(.init(start: 8, end: 16, text: "meeting, then we should review", isFinal: true))
+        spansAcross.finishRecognition()
+        check(spansAcross.phrases.map(\.raw) == ["The bike is outside.", "Please send three copies to Maya before the meeting, then we should review"], "recognition_end_keeps_sentence_across_spans")
         var batched = StreamingTextState()
         batched.receive(.init(start: 0, end: 1, text: "Send the report.", isFinal: true))
         batched.receive(.init(start: 1, end: 2, text: "It is due Tuesday.", isFinal: true))
@@ -216,6 +225,7 @@ enum PipelineChecks {
                 assert(passed, "Quiet OpenAI audio was not forwarded and finalized in full")
             }
             print("FIXTURE_REFINED: \(result.refined)")
+            for phrase in await text.phrasesForDebugging() { print("FIXTURE_PHRASE: raw=\(phrase.raw) | refined=\(phrase.refined ?? "nil")") }
             print("FILE_PIPELINE_COMPLETE: matched=\(result.finalized.lowercased().contains("purple bicycle")) words=\(result.finalized.split(whereSeparator: { $0.isWhitespace }).count) requests=\(await text.requests) notice=\(result.notice ?? "none") metrics=\(performance.latest)")
         } catch { let e = error as NSError; print("FILE_PIPELINE_ERROR: \(e.domain) \(e.code) \(e.localizedDescription)") }
     }
