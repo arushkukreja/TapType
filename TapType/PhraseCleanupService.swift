@@ -134,6 +134,9 @@ actor PhraseCleanupService {
     func receive(_ span: SpeechSpan) async {
         if state.receive(span) { await publish(state.snapshot); schedule() }
     }
+    func preview(start: Double, end: Double, words: [PreviewWord]) async {
+        state.preview(start: start, end: end, words: words); await publish(state.snapshot)
+    }
     func silence(through time: Double) async { state.silence(through: time); await publish(state.snapshot); schedule() }
     func beginStop() { state.beginStop() }
     func finishRecognition() async { state.finishRecognition(); await publish(state.snapshot); schedule() }

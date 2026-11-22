@@ -43,6 +43,11 @@ final class SpeechRecognizer: NSObject, ObservableObject {
             publish()
         }
     }
+    /// Show words in the keyboard while you speak. With a downloaded Whisper model this
+    /// also runs Apple Speech alongside it for the preview.
+    @Published var showsLivePreview = UserDefaults.standard.object(forKey: "livePreview") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(showsLivePreview, forKey: "livePreview"); publish() }
+    }
     private let engine = AVAudioEngine()
     private let sink = StreamingAudioSink()
     private var speechService: (any StreamingSpeech)?
@@ -176,6 +181,7 @@ final class SpeechRecognizer: NSObject, ObservableObject {
             let service: any StreamingSpeech
             if provider == .apple { service = AppleSpeechService(text: text, failure: failure) }
             else if provider == .openAI, let selection { service = OpenAIStreamingSpeech(selection: selection, text: text, failure: failure) }
+            else if provider.downloaded && showsLivePreview { service = HybridSpeechService(provider: provider, text: text, failure: failure) }
             else { service = PhraseSpeechService(provider: provider, selection: selection, text: text, failure: failure) }
             speechService = service
             let input = sink.begin(); performance.mark("capture")
@@ -293,7 +299,9 @@ final class SpeechRecognizer: NSObject, ObservableObject {
             "awaitingConfirmation": awaitingConfirmation, "cleaning": isCleaning,
             "notice": cleanupNotice ?? "", "error": errorMessage ?? "",
             "levels": pendingLevels, "levelSequence": levelSequence,
-            "refusedStart": refusedStart?.id ?? "", "refusedReason": refusedStart?.reason ?? ""], to: "state.json")
+            "refusedStart": refusedStart?.id ?? "", "refusedReason": refusedStart?.reason ?? "",
+            // The end of the live transcript, so the keyboard can show words as you speak.
+            "live": isRecording && showsLivePreview ? String(transcript.suffix(200)) : ""], to: "state.json")
         BridgeSignal.post(.state)
         updateActivity()
     }

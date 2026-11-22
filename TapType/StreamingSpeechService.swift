@@ -68,7 +68,12 @@ actor AppleSpeechService: StreamingSpeech {
     private var detection: Task<Void, Error>?
     private var continuation: AsyncStream<AnalyzerInput>.Continuation?
     private var cancelled = false
-    init(text: PhraseCleanupService, failure: @escaping @Sendable () async -> Void) { self.text = text; self.failure = failure }
+    /// Preview mode only shows live words for another recognizer to replace: it never
+    /// finalizes text, reports pauses, or ends recognition.
+    private let previewOnly: Bool
+    init(text: PhraseCleanupService, previewOnly: Bool = false, failure: @escaping @Sendable () async -> Void) {
+        self.text = text; self.previewOnly = previewOnly; self.failure = failure
+    }
     static func transcriber() -> SpeechTranscriber {
         SpeechTranscriber(locale: Locale(identifier: "en-US"), transcriptionOptions: [],
                           reportingOptions: [.volatileResults, .fastResults], attributeOptions: [.audioTimeRange])
@@ -91,11 +96,21 @@ actor AppleSpeechService: StreamingSpeech {
         guard !cancelled else { throw CancellationError() }
         let pair = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingOldest(256))
         continuation = pair.continuation
-        let text = self.text, failure = self.failure
+        let text = self.text, failure = self.failure, previewOnly = self.previewOnly
         results = Task {
             do {
                 for try await result in transcriber.results {
                     try Task.checkCancellation()
+                    if previewOnly {
+                        var words: [PreviewWord] = []
+                        for (range, characters) in result.text.runs[\.audioTimeRange] {
+                            guard let range else { continue }
+                            words.append(.init(start: range.start.seconds, end: range.end.seconds,
+                                               text: String(result.text[characters].characters)))
+                        }
+                        await text.preview(start: result.range.start.seconds, end: result.range.end.seconds, words: words)
+                        continue
+                    }
                     await text.receive(.init(start: result.range.start.seconds, end: result.range.end.seconds,
                                              text: String(result.text.characters), isFinal: result.isFinal))
                 }
@@ -107,7 +122,7 @@ actor AppleSpeechService: StreamingSpeech {
                     try Task.checkCancellation()
                     if !result.speechDetected && result.range.duration.seconds >= 0.6 {
                         // VAD is a boundary hint, never evidence that provisional text is final.
-                        await text.silence(through: result.range.start.seconds)
+                        if !previewOnly { await text.silence(through: result.range.start.seconds) }
                         try await analyzer.finalize(through: result.range.start)
                     }
                 }
@@ -146,13 +161,52 @@ actor AppleSpeechService: StreamingSpeech {
         try await analyzer?.finalizeAndFinishThroughEndOfInput()
         try await results?.value
         try await detection?.value
-        await text.finishRecognition()
+        if !previewOnly { await text.finishRecognition() }
     }
     func cancel() async {
         cancelled = true
         source?.cancel(); results?.cancel(); detection?.cancel(); continuation?.finish()
         await analyzer?.cancelAndFinishNow()
         analyzer = nil
+    }
+}
+
+/// A downloaded Whisper model with Apple Speech as a live preview: Apple's words appear
+/// as you speak, and each Whisper phrase replaces them once it's transcribed. Only
+/// Whisper's text is cleaned up and inserted. Without Apple Speech, it runs Whisper alone.
+actor HybridSpeechService: StreamingSpeech {
+    private let whisper: PhraseSpeechService
+    private let preview: AppleSpeechService
+    private var tee: Task<Void, Never>?
+    private var previewInput: AsyncStream<CapturedAudio>.Continuation?
+    init(provider: SpeechProvider, text: PhraseCleanupService, failure: @escaping @Sendable () async -> Void) {
+        whisper = PhraseSpeechService(provider: provider, selection: nil, text: text, failure: failure)
+        // A preview failure must never end the dictation; Whisper's text is what counts.
+        preview = AppleSpeechService(text: text, previewOnly: true) {}
+    }
+    func start(input: AsyncStream<CapturedAudio>, format: AVAudioFormat) async throws {
+        let main = AsyncStream<CapturedAudio>.makeStream(bufferingPolicy: .bufferingOldest(256))
+        let side = AsyncStream<CapturedAudio>.makeStream(bufferingPolicy: .bufferingNewest(256))
+        previewInput = side.continuation
+        tee = Task {
+            for await packet in input {
+                main.continuation.yield(packet)
+                side.continuation.yield(packet)
+            }
+            main.continuation.finish(); side.continuation.finish()
+        }
+        try await whisper.start(input: main.stream, format: format)
+        do { try await preview.start(input: side.stream, format: format) }
+        catch { side.continuation.finish() }
+    }
+    func finish() async throws {
+        try await whisper.finish()
+        await preview.cancel()
+    }
+    func cancel() async {
+        tee?.cancel(); previewInput?.finish()
+        await preview.cancel()
+        await whisper.cancel()
     }
 }
 

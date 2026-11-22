@@ -3,6 +3,7 @@ import CryptoKit
 import SwiftUI
 import WhisperKit
 import ArgmaxCore
+import SpeechModels
 
 struct DownloadableModel: Decodable, Identifiable {
     struct File: Decodable {
@@ -66,13 +67,19 @@ final class ModelStore: ObservableObject {
         prepareTask = Task {
             defer { preparing = nil; prepareTask = nil }
             do {
-                // Validate locally first so WhisperKit cannot silently download a missing tokenizer.
-                _ = try await AutoTokenizerWrapper.from(modelFolder: location)
-                // prewarm loads and unloads each part in turn, which triggers and caches
-                // iOS's on-device optimization without holding the whole model in memory.
-                let pipeline = try await WhisperKit(WhisperKitConfig(modelFolder: location.path, tokenizerFolder: location,
-                    verbose: false, logLevel: .none, prewarm: true, load: false, download: false))
-                await pipeline.unloadModels()
+                if Self.isParakeet(next.id) {
+                    // Loading once compiles and caches the Core ML models for this iPhone.
+                    let manager = try await Self.loadParakeet(from: location)
+                    await manager.cleanup()
+                } else {
+                    // Validate locally first so WhisperKit cannot silently download a missing tokenizer.
+                    _ = try await AutoTokenizerWrapper.from(modelFolder: location)
+                    // prewarm loads and unloads each part in turn, which triggers and caches
+                    // iOS's on-device optimization without holding the whole model in memory.
+                    let pipeline = try await WhisperKit(WhisperKitConfig(modelFolder: location.path, tokenizerFolder: location,
+                        verbose: false, logLevel: .none, prewarm: true, load: false, download: false))
+                    await pipeline.unloadModels()
+                }
                 try Data("1".utf8).write(to: location.appendingPathComponent("prepared"), options: .atomic)
                 refresh()
                 notice = "\(next.name) is ready. Choose it under Speech model."
@@ -169,16 +176,55 @@ final class ModelStore: ObservableObject {
     func releasePhraseModel() async {
         guard !inUse else { return }
         if let load = loadTask { _ = try? await load.task.value }
+        if let load = parakeetLoad { _ = try? await load.task.value }
         guard !inUse else { return }
-        let pipeline = phrasePipeline
-        phrasePipeline = nil; phraseModel = nil
+        let pipeline = phrasePipeline, manager = parakeetManager
+        phrasePipeline = nil; phraseModel = nil; parakeetManager = nil; parakeetModel = nil
         await pipeline?.unloadModels()
+        await manager?.cleanup()
+    }
+    // MARK: NVIDIA Parakeet (via FluidAudio)
+    nonisolated static func isParakeet(_ id: String) -> Bool { id.hasPrefix("parakeet") }
+    private var parakeetManager: AsrManager?
+    private var parakeetModel: String?
+    private var parakeetLoad: (id: String, task: Task<AsrManager, Error>)?
+    /// Loads Parakeet from TapType's own verified download. FluidAudio's offline mode
+    /// stops it from fetching anything itself if a file were missing.
+    nonisolated private static func loadParakeet(from location: URL) async throws -> AsrManager {
+        ModelHub.offlineMode = true
+        let models = try await AsrModels.load(from: location.appendingPathComponent("parakeet-tdt-0.6b-v3-coreml", isDirectory: true),
+                                              version: .v3, encoderPrecision: .int8V2)
+        let manager = AsrManager(config: .default)
+        try await manager.loadModels(models)
+        return manager
+    }
+    private func parakeet(for id: String) async throws -> AsrManager {
+        if let existing = parakeetManager, parakeetModel == id { return existing }
+        if let load = parakeetLoad, load.id == id { return try await load.task.value }
+        let location = try location(id)
+        // Only one phrase model in memory at a time.
+        let previous = phrasePipeline
+        phrasePipeline = nil; phraseModel = nil
+        await previous?.unloadModels()
+        let task = Task { try await Self.loadParakeet(from: location) }
+        parakeetLoad = (id, task)
+        do {
+            let manager = try await task.value
+            if parakeetLoad?.id == id { parakeetLoad = nil }
+            parakeetManager = manager; parakeetModel = id
+            return manager
+        } catch {
+            if parakeetLoad?.id == id { parakeetLoad = nil }
+            throw error
+        }
     }
     /// Starts loading a prepared model in the background so the first phrase of a
     /// dictation doesn't wait for it. Does nothing if it's already loaded or loading.
     func preload(_ id: String) {
-        guard prepared.contains(id), preparing == nil, phraseModel != id, loadTask?.id != id else { return }
-        Task { _ = try? await phrasePipeline(for: id) }
+        guard prepared.contains(id), preparing == nil, phraseModel != id, loadTask?.id != id,
+              parakeetModel != id, parakeetLoad?.id != id else { return }
+        if Self.isParakeet(id) { Task { _ = try? await parakeet(for: id) } }
+        else { Task { _ = try? await phrasePipeline(for: id) } }
     }
     private var loadTask: (id: String, task: Task<WhisperKit, Error>)?
     /// The loaded pipeline for `id`, loading it once and sharing an in-flight load.
@@ -186,9 +232,10 @@ final class ModelStore: ObservableObject {
         if let existing = phrasePipeline, phraseModel == id { return existing }
         if let load = loadTask, load.id == id { return try await load.task.value }
         let location = try location(id)
-        let previous = phrasePipeline
-        phrasePipeline = nil; phraseModel = nil
+        let previous = phrasePipeline, previousParakeet = parakeetManager
+        phrasePipeline = nil; phraseModel = nil; parakeetManager = nil; parakeetModel = nil
         await previous?.unloadModels()
+        await previousParakeet?.cleanup()
         let task = Task { () throws -> WhisperKit in
             // Validate locally first so WhisperKit cannot silently download a missing tokenizer.
             do { _ = try await AutoTokenizerWrapper.from(modelFolder: location) }
@@ -211,6 +258,7 @@ final class ModelStore: ObservableObject {
         guard !inUse else { throw ProviderFailure(message: "A dictation is already finishing. Please wait a moment.") }
         guard preparing == nil else { throw ProviderFailure(message: "A downloaded model is getting ready. Try again in a few minutes, or choose Apple Speech.") }
         inUse = true; defer { inUse = false }
+        if Self.isParakeet(id) { return try await transcribeWithParakeet(samples, model: id) }
         let pipeline = try await phrasePipeline(for: id)
         #if DEBUG
         let decodeStart = ProcessInfo.processInfo.systemUptime
@@ -236,6 +284,28 @@ final class ModelStore: ObservableObject {
             phrasePipeline = nil; phraseModel = nil
             if error is CancellationError { throw error }
             throw (error as? ProviderFailure) ?? ProviderFailure(message: "This model couldn’t finish. Try a shorter dictation or choose Apple Speech.")
+        }
+    }
+    private func transcribeWithParakeet(_ samples: [Float], model id: String) async throws -> String {
+        let manager = try await parakeet(for: id)
+        #if DEBUG
+        let decodeStart = ProcessInfo.processInfo.systemUptime
+        #endif
+        do {
+            try Task.checkCancellation()
+            var state = TdtDecoderState.make()
+            let result = try await manager.transcribe(samples, decoderState: &state)
+            try Task.checkCancellation()
+            let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--whisper-fixture") { print("WHISPER_PHRASE: seconds=\(Double(samples.count) / 16000) decode=\(ProcessInfo.processInfo.systemUptime - decodeStart) words=\(text.split(whereSeparator: \.isWhitespace).count) text=\(text)") }
+            #endif
+            return text
+        } catch {
+            await manager.cleanup()
+            parakeetManager = nil; parakeetModel = nil
+            if error is CancellationError { throw error }
+            throw ProviderFailure(message: "Parakeet couldn’t finish. Try again or choose Apple Speech.")
         }
     }
 }

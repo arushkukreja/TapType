@@ -900,7 +900,11 @@ final class KeyboardViewController: UIInputViewController {
         listeningLabel.text = preparing ? "Getting ready…" : !error.isEmpty ? error : finished ? "Ready to insert" : !alive ? "Open TapType to reconnect" :
             state["awaitingConfirmation"] as? Bool == true ? "Tap ✓ to finish" : processing ? (state["cleaning"] as? Bool == true ? "Cleaning up…" : "Finishing…") : recording ? "Listening\niPhone Microphone" : "Connecting…"
         if ticket?.document != document && finished { listeningLabel.text = "Text ready\nTap ✓ to insert here" }
-        listeningLabel.font = .systemFont(ofSize: error.isEmpty ? 20 : 14)
+        // Show the words as they're recognized; the newest stay visible.
+        let live = recording && error.isEmpty ? (state["live"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        if !live.isEmpty { listeningLabel.text = live }
+        listeningLabel.font = .systemFont(ofSize: !error.isEmpty ? 14 : live.isEmpty ? 20 : 17)
+        listeningLabel.lineBreakMode = live.isEmpty ? .byTruncatingTail : .byTruncatingHead
         listeningLabel.numberOfLines = 3
         let showLogo = processing && error.isEmpty
         if processingLogo.isHidden == showLogo {

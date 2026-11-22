@@ -9,6 +9,13 @@ struct SpeechSpan: Sendable, Equatable {
     func overlaps(_ other: Self) -> Bool { start < other.end - 0.0001 && end > other.start + 0.0001 }
 }
 
+/// A word from a live preview recognizer, with its time in the recording.
+struct PreviewWord: Sendable, Equatable {
+    let start: Double
+    let end: Double
+    let text: String
+}
+
 struct CleanupPhrase: Sendable, Identifiable {
     let id: UUID
     let raw: String
@@ -37,6 +44,9 @@ struct StreamingTextState: Sendable {
     /// and the next span; a later pause says nothing about earlier span boundaries.
     private var pauses: [Double] = []
     private(set) var recognitionEnded = false
+    /// Live words from a fast preview recognizer, shown only for audio the main
+    /// recognizer hasn't finalized yet. Never cleaned up or inserted.
+    private var previewResults: [(start: Double, end: Double, words: [PreviewWord])] = []
     var notice: String?
     static func joined(_ values: [String]) -> String { values.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.joined(separator: " ") }
     static func correctionCue(_ text: String) -> Bool {
@@ -65,15 +75,29 @@ struct StreamingTextState: Sendable {
         rebuild()
     }
     mutating func beginStop() { if phase == .recording { phase = .finalizing } }
+    /// Replaces the preview for one recognizer result's time range.
+    mutating func preview(start: Double, end: Double, words: [PreviewWord]) {
+        guard phase == .recording || phase == .finalizing, !recognitionEnded, start.isFinite, end.isFinite, end >= start else { return }
+        previewResults.removeAll { $0.start < end - 0.0001 && $0.end > start + 0.0001 }
+        previewResults.append((start, end, words))
+        previewResults.sort { $0.start < $1.start }
+    }
+    /// Preview words after the last finalized speech.
+    var previewText: String {
+        let covered = spans.filter(\.isFinal).map(\.end).max() ?? -Double.infinity
+        return previewResults.flatMap(\.words).filter { $0.start >= covered - 0.05 }.map(\.text).joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
     mutating func finishRecognition() {
         guard phase != .cancelled else { return }
         recognitionEnded = true
+        previewResults.removeAll()
         if spans.contains(where: { !$0.isFinal }) { notice = "Some speech couldn’t be finalized. Only confirmed words are included." }
         spans.removeAll { !$0.isFinal }
         rebuild()
     }
     mutating func finish() { guard phase != .cancelled else { return }; phase = .finished }
-    mutating func cancel() { phase = .cancelled; spans.removeAll(); phrases.removeAll(); pending = "" }
+    mutating func cancel() { phase = .cancelled; spans.removeAll(); phrases.removeAll(); pending = ""; previewResults.removeAll() }
     mutating func refine(id: UUID, text: String, completed: Bool) {
         guard phase != .cancelled && phase != .finished, let i = phrases.firstIndex(where: { $0.id == id }) else { return }
         if completed { phrases[i].refined = text; phrases[i].draft = nil }
@@ -91,7 +115,7 @@ struct StreamingTextState: Sendable {
         let finalized = Self.joined(spans.filter(\.isFinal).map(\.text))
         let provisional = Self.joined(spans.filter { !$0.isFinal }.map(\.text))
         let refined = Self.joined(phrases.compactMap(\.refined))
-        let display = Self.joined(phrases.map { $0.draft ?? $0.refined ?? $0.raw } + [pending, provisional])
+        let display = Self.joined(phrases.map { $0.draft ?? $0.refined ?? $0.raw } + [pending, provisional, previewText])
         return .init(raw: Self.joined(spans.map(\.text)), provisional: provisional, finalized: finalized,
                      refined: refined, display: display, notice: notice)
     }

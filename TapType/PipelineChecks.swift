@@ -21,6 +21,13 @@ enum PipelineChecks {
         func check(_ yes: Bool, _ name: String) { print("PIPELINE_CHECK: \(name)=\(yes)"); assert(yes, name); n += 1 }
         check(!LocalTextProcessor.plausible("This recording is a prototype of the Quantum Echo, featuring enhanced sound modulation and a sleek, ergonomic design.", original: "This recording is"), "cleanup_rejects_invented_ending")
         check(LocalTextProcessor.plausible("Can you send 3 copies to Maya?", original: "um can you uh send 3 copies to Maya"), "cleanup_keeps_filler_removal")
+        var preview = StreamingTextState()
+        preview.preview(start: 0, end: 3, words: [.init(start: 0, end: 1, text: "Send"), .init(start: 1, end: 2, text: " three"), .init(start: 2, end: 3, text: " copies")])
+        check(preview.snapshot.display == "Send three copies" && preview.next == nil, "preview_visible_never_queued")
+        preview.receive(.init(start: 0, end: 1.9, text: "Send 3", isFinal: true))
+        check(preview.snapshot.display == "Send 3 copies", "final_replaces_preview_words_it_covers")
+        preview.finishRecognition()
+        check(preview.snapshot.display == "Send 3" && !preview.snapshot.finalized.contains("copies"), "preview_dropped_when_recognition_ends")
         var pauses = StreamingTextState()
         pauses.receive(.init(start: 0, end: 2, text: "I am not sure whether the", isFinal: true))
         pauses.receive(.init(start: 2, end: 4, text: "delivery can arrive before Friday", isFinal: true))
@@ -146,7 +153,11 @@ enum PipelineChecks {
             let service: any StreamingSpeech
             if args.contains("--openai-fixture") || quietOpenAI { service = OpenAIStreamingSpeech(selection: try CloudSelection(.openAI), text: text) { print("FILE_PIPELINE_SPEECH_ERROR") } }
             else if args.contains("--groq-fixture") { service = PhraseSpeechService(provider: .groq, selection: try CloudSelection(.groq), text: text) { print("FILE_PIPELINE_SPEECH_ERROR") } }
-            else if args.contains("--whisper-fixture") { service = PhraseSpeechService(provider: args.contains("--whisper-turbo") ? .turbo : .base, selection: nil, text: text) { print("FILE_PIPELINE_SPEECH_ERROR") } }
+            else if args.contains("--whisper-fixture") {
+                let provider: SpeechProvider = args.contains("--parakeet") ? .parakeet : args.contains("--whisper-turbo") ? .turbo : .base
+                if args.contains("--no-preview") { service = PhraseSpeechService(provider: provider, selection: nil, text: text) { print("FILE_PIPELINE_SPEECH_ERROR") } }
+                else { service = HybridSpeechService(provider: provider, text: text) { print("FILE_PIPELINE_SPEECH_ERROR") } }
+            }
             else { service = AppleSpeechService(text: text) { print("FILE_PIPELINE_SPEECH_ERROR") } }
             let input = AsyncStream<CapturedAudio>.makeStream(bufferingPolicy: .bufferingOldest(256))
             async let warm: Void = text.prepare()
