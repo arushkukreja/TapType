@@ -22,6 +22,10 @@ struct CleanupPhrase: Sendable, Identifiable {
     let correction: Bool
     var refined: String?
     var draft: String?
+    /// Set when several phrases were cleaned in one request: the first holds the cleaned
+    /// text for all of them (`covers`), the rest are blank and point to it (`coveredBy`).
+    var covers: [UUID] = []
+    var coveredBy: UUID?
 }
 
 struct DictationTextSnapshot: Sendable {
@@ -103,6 +107,18 @@ struct StreamingTextState: Sendable {
         if completed { phrases[i].refined = text; phrases[i].draft = nil }
         else { phrases[i].draft = text }
     }
+    /// Stores one cleaned text for several phrases cleaned together.
+    mutating func refineBatch(_ ids: [UUID], text: String) {
+        guard phase != .cancelled && phase != .finished, let first = ids.first,
+              ids.allSatisfy({ id in phrases.contains { $0.id == id } }) else { return }
+        for i in phrases.indices where ids.contains(phrases[i].id) {
+            let isFirst = phrases[i].id == first
+            phrases[i].refined = isFirst ? text : ""
+            phrases[i].draft = nil
+            phrases[i].covers = isFirst ? Array(ids.dropFirst()) : []
+            phrases[i].coveredBy = isFirst ? nil : first
+        }
+    }
     mutating func clearDraft(id: UUID) {
         if let i = phrases.firstIndex(where: { $0.id == id }) { phrases[i].draft = nil }
     }
@@ -159,6 +175,19 @@ struct StreamingTextState: Sendable {
             if prefixUnchanged, index < old.count, old[index].raw == item.0, old[index].correction == (item.1 || Self.containsCorrection(item.0)) { return old[index] }
             prefixUnchanged = false
             return CleanupPhrase(id: UUID(), raw: item.0, correction: item.1 || Self.containsCorrection(item.0))
+        }
+        // A batch's cleaned text is only valid while every phrase in it is unchanged.
+        // If one was regrouped, clean the whole group again: otherwise its words would
+        // appear twice (or vanish, if the phrase holding the text was the one replaced).
+        let ids = Set(phrases.map(\.id))
+        var broken = Set<UUID>()
+        for phrase in phrases {
+            if !phrase.covers.isEmpty, !phrase.covers.allSatisfy(ids.contains) { broken.insert(phrase.id) }
+            if let owner = phrase.coveredBy, !ids.contains(owner) { broken.insert(phrase.id) }
+        }
+        for phrase in phrases where broken.contains(phrase.id) { broken.formUnion(phrase.covers) }
+        for i in phrases.indices where broken.contains(phrases[i].id) {
+            phrases[i].refined = nil; phrases[i].draft = nil; phrases[i].covers = []; phrases[i].coveredBy = nil
         }
     }
 }

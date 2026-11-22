@@ -192,7 +192,7 @@ final class ModelStore: ObservableObject {
     /// stops it from fetching anything itself if a file were missing.
     nonisolated private static func loadParakeet(from location: URL) async throws -> AsrManager {
         ModelHub.offlineMode = true
-        let models = try await AsrModels.load(from: location.appendingPathComponent("parakeet-tdt-0.6b-v3-coreml", isDirectory: true),
+        let models = try await AsrModels.load(from: location.appendingPathComponent("parakeet-tdt-0.6b-v3", isDirectory: true),
                                               version: .v3, encoderPrecision: .int8V2)
         let manager = AsrManager(config: .default)
         try await manager.loadModels(models)

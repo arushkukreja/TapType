@@ -178,8 +178,8 @@ actor PhraseCleanupService {
                 for member in batch { state.clearDraft(id: member.id) }
                 await publish(state.snapshot); continue
             }
-            state.refine(id: phrase.id, text: result.text, completed: true)
-            for other in batch.dropFirst() { state.refine(id: other.id, text: "", completed: true) }
+            if batch.count == 1 { state.refine(id: phrase.id, text: result.text, completed: true) }
+            else { state.refineBatch(batch.map(\.id), text: result.text) }
             if let notice = result.notice { state.notice = notice }
             await publish(state.snapshot)
             if generation == epoch && state.phase == .recording { await cleaner.prepare(mode: mode) }

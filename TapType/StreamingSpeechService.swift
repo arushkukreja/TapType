@@ -240,7 +240,12 @@ actor PhraseSpeechService: StreamingSpeech {
             let rate = format.sampleRate
             // On-device models get shorter phrases for faster text. Cloud phrases stay
             // longer: providers such as Groq bill a minimum duration per request.
-            let local = selection == nil, longest: Double = local ? 6 : 12
+            // Parakeet transcribes a phrase in about a tenth of a second, so it can take
+            // longer phrases split only at real pauses: every cut costs it accuracy at the
+            // boundary (it starts a new sentence there), and the live preview shows the words
+            // in the meantime. Whisper takes ~1.2 s per phrase, so it keeps short ones.
+            let local = selection == nil, fast = ModelStore.isParakeet(provider.rawValue)
+            let longest: Double = !local || fast ? 12 : 6
             func emit(_ phrase: [Float], from start: Double, ending: PhraseEnd = .pause) throws {
                 if case .dropped = pair.continuation.yield((.init(samples: phrase, sampleRate: rate), start, start + Double(phrase.count) / rate, ending)) {
                     throw ProviderFailure(message: "Transcription couldn’t keep up. Please finish this dictation.")
@@ -293,7 +298,7 @@ actor PhraseSpeechService: StreamingSpeech {
                         // A short pause ends an on-device phrase once it has some length, but
                         // only a pause of 0.65 s or more counts as a sentence break for cleanup.
                         if silence >= 0.65 { try send() }
-                        else if local && length >= 3 && silence >= 0.3 { try send(ending: .breath) }
+                        else if local && !fast && length >= 3 && silence >= 0.3 { try send(ending: .breath) }
                         else if length >= longest { if local { try splitAtQuietestPoint() } else { try send() } }
                     } else {
                         preRoll.append(contentsOf: UnsafeBufferPointer(start: channel, count: count))
