@@ -320,7 +320,8 @@ actor PhraseSpeechService: StreamingSpeech {
                     else { decoded = try await ModelStore.shared.transcribe(samples, model: provider.rawValue, keepLoaded: true) }
                     try Task.checkCancellation()
                     let value = selection == nil
-                        ? TranscriptEchoReducer.removingImmediateEchoes(from: TranscriptEchoReducer.removingLeadingEcho(from: decoded, after: priorTranscript))
+                        ? TranscriptEchoReducer.removingImmediateEchoes(from: TranscriptEchoReducer.removingLeadingEcho(
+                            from: TranscriptArtifacts.cleaned(decoded), after: priorTranscript))
                         : decoded
                     // A VAD false positive can decode to silence; it must not end a long dictation.
                     guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }

@@ -105,11 +105,15 @@ enum LocalTextProcessor {
     }
 
     nonisolated static func plausible(_ edited: String, original: String, mode: CleanupMode = .cleanup) -> Bool {
-        guard !edited.isEmpty, edited.count <= max(160, original.count * 2) else { return false }
+        plausibilityIssue(edited, original: original, mode: mode) == nil
+    }
+    /// Why an edit is rejected, or nil when it's acceptable.
+    nonisolated static func plausibilityIssue(_ edited: String, original: String, mode: CleanupMode = .cleanup) -> String? {
+        guard !edited.isEmpty, edited.count <= max(160, original.count * 2) else { return "length" }
         let digits: (String) -> [String] = { text in
             text.components(separatedBy: CharacterSet.decimalDigits.inverted).filter { !$0.isEmpty }.sorted()
         }
-        guard digits(edited) == digits(original) else { return false }
+        guard digits(edited) == digits(original) else { return "digits" }
         let words: (String) -> [String] = { text in
             text.lowercased().replacingOccurrences(of: "’", with: "'")
                 .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "'")).inverted)
@@ -119,15 +123,79 @@ enum LocalTextProcessor {
         // Cleanup removes words; even a rewrite barely adds any. Many extra words mean the
         // model invented content (for example "finishing" a sentence fragment).
         let allowedGrowth = mode == .rewrite ? max(3, before.count * 3 / 10) : max(2, before.count / 5)
-        guard after.count <= before.count + allowedGrowth else { return false }
+        guard after.count <= before.count + allowedGrowth else { return "grew" }
+        guard !addsSymbols(edited, original: original) else { return "symbols" }
+        // Words the speaker said, plus the pieces of their contractions ("what's" -> what, is).
+        var spoken = Set(before)
+        for word in before where word.contains("'") {
+            let parts = word.split(separator: "'").map(String.init)
+            spoken.formUnion(parts)
+            if word.hasSuffix("n't") { spoken.insert("not"); spoken.insert(String(word.dropLast(3))) }
+        }
+        let numberWords: Set<String> = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "hundred", "thousand", "million"]
+        let joining: Set<String> = ["a", "an", "the", "and", "but", "or", "so", "to", "of", "in", "on", "at", "for", "with", "is", "are", "was", "were", "be", "been", "am", "it", "it's", "that", "this", "i", "i'm", "we", "you", "me", "us", "my", "our", "your", "would", "could", "can", "will", "do", "does", "did", "have", "has", "had", "not", "if", "as", "by", "from", "about", "just", "which", "who", "there", "then", "than", "also", "let", "let's", "s", "re", "ll", "ve", "d", "m", "t"]
+        let isNumber: (String) -> Bool = { Int($0) != nil || numberWords.contains($0) }
+        // New words that carry meaning. Clean up must add none; a rewrite may rephrase a little.
+        let added = Set(after).subtracting(spoken).subtracting(joining).filter { !isNumber($0) }
+        let content = Set(after).subtracting(joining).filter { !isNumber($0) }
+        guard added.count <= (mode == .rewrite ? max(2, content.count / 5) : 0) else { return "added \(added.sorted())" }
+        // Edits never end on a new word: that's how answers ("France? Paris.") and finished
+        // fragments ("went to the museum") show up.
+        if let last = after.last, !spoken.contains(last), !isNumber(last) { return "new last word \(last)" }
+        // Hedges, greetings and thanks carry meaning and tone; an edit must keep them.
+        let mustKeep: Set<String> = ["maybe", "perhaps", "probably", "possibly", "might", "may", "around", "about", "approximately", "roughly", "think", "guess", "sure", "likely", "unsure", "whether", "hi", "hey", "hello", "thanks", "thank", "please", "sorry"]
+        let missing = Set(before).intersection(mustKeep).subtracting(after)
+        guard missing.isEmpty else { return "dropped \(missing.sorted())" }
         let negatives: Set<String> = ["no", "not", "never", "neither", "nor", "cannot", "can't", "won't", "don't", "doesn't", "didn't", "isn't", "aren't", "wasn't", "weren't", "haven't", "hasn't", "hadn't", "shouldn't", "wouldn't", "couldn't", "mustn't"]
-        guard before.filter({ negatives.contains($0) }).count == after.filter({ negatives.contains($0) }).count else { return false }
-        let fillers: Set<String> = ["um", "uh", "erm", "hmm"]
+        guard before.filter({ negatives.contains($0) }).count == after.filter({ negatives.contains($0) }).count else { return "negation" }
+        let fillers: Set<String> = ["um", "uh", "erm", "hmm", "like", "basically", "yeah", "okay", "so", "actually", "literally", "kinda", "kind", "sort", "know", "mean"]
         let sourceWords = Set(before).subtracting(fillers)
-        guard !sourceWords.isEmpty else { return true }
+        guard !sourceWords.isEmpty else { return nil }
+        // Every sentence must survive on its own: when several are edited together, one
+        // losing half its words would otherwise hide inside the overall count.
+        let kept = Set(after)
+        let sentenceMinimum = mode == .rewrite ? 0.5 : 0.75
+        for sentence in original.split(whereSeparator: { ".!?".contains($0) }) {
+            let sentenceWords = Set(words(String(sentence))).subtracting(fillers)
+            guard sentenceWords.count >= 4 else { continue }
+            let share = Double(sentenceWords.intersection(kept).count) / Double(sentenceWords.count)
+            guard share >= sentenceMinimum else { return "dropped part of \"\(sentence.trimmingCharacters(in: .whitespaces).prefix(40))\"" }
+        }
         let retained = Double(sourceWords.intersection(Set(after)).count) / Double(sourceWords.count)
-        // Conservative rejection of answers, summaries, and excessive changes.
-        // These checks cannot guarantee semantic equivalence; keep the original.
-        return retained >= (mode == .rewrite ? 0.4 : 0.6)
+        // Clean up only removes fillers and repeats, so nearly every other word must remain;
+        // a rewrite may rephrase but not drop whole clauses. These checks can't guarantee
+        // the meaning is unchanged; when they fail, the original words are kept.
+        return retained >= (mode == .rewrite ? 0.7 : 0.85) ? nil : "kept \(Int(retained * 100))%"
+    }
+    /// Rule-based cleanup that can't change meaning: removes hesitation sounds (um, uh,
+    /// er, hmm) and stuttered repeats ("the the"), and capitalizes the start and "I".
+    /// Runs before the model, and is what's kept when the model's edit is rejected.
+    nonisolated static func basicCleanup(_ text: String) -> String {
+        var value = text
+        // Hesitation sounds, with any comma that follows them.
+        value = value.replacingOccurrences(of: #"(?i)\b(?:u+m+|u+h+|e+r+m*|h+m+)\b,?\s*"#, with: "", options: .regularExpression)
+        // A word said twice in a row, except where doubling is normal English.
+        let doubled = try! NSRegularExpression(pattern: #"(?i)\b([a-z']+)(?:\s+\1\b)+"#)
+        let keepDoubled: Set<String> = ["had", "that", "is", "do", "very", "so", "no", "bye", "now", "really", "far", "long"]
+        let source = value as NSString
+        var result = "", cursor = 0
+        for match in doubled.matches(in: value, range: NSRange(location: 0, length: source.length)) {
+            let word = source.substring(with: match.range(at: 1))
+            guard !keepDoubled.contains(word.lowercased()) else { continue }
+            result += source.substring(with: NSRange(location: cursor, length: match.range.location - cursor)) + word
+            cursor = match.range.location + match.range.length
+        }
+        value = result + source.substring(from: cursor)
+        value = value.replacingOccurrences(of: #"\bi\b(?=['’ ]|$)"#, with: "I", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+([,.!?])"#, with: "$1", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let first = value.first, first.isLowercase { value = first.uppercased() + value.dropFirst() }
+        return value.isEmpty ? text : value
+    }
+    /// Parentheses, brackets, markdown or quotation marks the speaker didn't dictate.
+    nonisolated static func addsSymbols(_ edited: String, original: String) -> Bool {
+        let symbols = Set("()[]{}<>*#\"“”_|")
+        return edited.contains(where: symbols.contains) && !original.contains(where: symbols.contains)
     }
 }

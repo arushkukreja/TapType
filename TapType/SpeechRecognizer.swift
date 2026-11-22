@@ -482,6 +482,28 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     }
 
     #if DEBUG
+    /// Runs a short real dictation, cancels it, then logs when Keep ready releases the
+    /// microphone and model. Launch with --readiness-test (optionally --readiness-minutes N).
+    func testReadiness() async {
+        setbuf(stdout, nil)
+        let args = ProcessInfo.processInfo.arguments
+        let minutes = args.firstIndex(of: "--readiness-minutes").flatMap { Int(args[$0 + 1]) } ?? 1
+        let saved = readinessMinutes
+        readinessMinutes = minutes
+        await start(requestID: UUID().uuidString)
+        try? await Task.sleep(for: .seconds(3))
+        print("READINESS_START: minutes=\(minutes) recording=\(isRecording) mic=\(engine.isRunning) model=\(ModelStore.shared.loadedModelDescription)")
+        cancelDictation()
+        let began = uptime
+        while uptime - began < Double(max(minutes, 0) * 60 + 90) {
+            print("READINESS: t=\(Int(uptime - began)) mic=\(engine.isRunning) session=\(sessionEnabled) left=\(readiness.deadline.map { Int($0 - uptime) } ?? -1) app=\(UIApplication.shared.applicationState.rawValue) model=\(ModelStore.shared.loadedModelDescription)")
+            if !engine.isRunning { break }
+            try? await Task.sleep(for: .seconds(10))
+        }
+        try? await Task.sleep(for: .seconds(2))
+        print("READINESS_DONE: after=\(Int(uptime - began)) mic=\(engine.isRunning) model=\(ModelStore.shared.loadedModelDescription)")
+        readinessMinutes = saved
+    }
     func testAppleStreaming() async {
         setbuf(stdout, nil)
         let keys = ["speechProvider", "writingProvider", "cleanupMode"]
