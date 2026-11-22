@@ -183,6 +183,9 @@ final class ModelStore: ObservableObject {
         await pipeline?.unloadModels()
         await manager?.cleanup()
     }
+    #if DEBUG
+    var loadedModelDescription: String { parakeetModel ?? phraseModel ?? "none" }
+    #endif
     // MARK: NVIDIA Parakeet (via FluidAudio)
     nonisolated static func isParakeet(_ id: String) -> Bool { id.hasPrefix("parakeet") }
     private var parakeetManager: AsrManager?

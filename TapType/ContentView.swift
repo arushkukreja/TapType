@@ -196,6 +196,7 @@ struct ContentView: View {
             let args = ProcessInfo.processInfo.arguments
             if args.contains("--text-preview") { speech.editCompleted("Please send five copies to Maya."); return }
             if args.contains("--audio-probe") { await PipelineChecks.audioProbe(); return }
+            if args.contains("--readiness-test") { await speech.testReadiness(); return }
             if args.contains("--apple-benchmark") || args.contains("--cloud-benchmark") { await speech.testAppleStreaming(); return }
             if args.contains("--apple-assets") {
                 AppleSpeechAssets.shared.download()

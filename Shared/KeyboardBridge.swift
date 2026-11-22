@@ -229,6 +229,25 @@ enum ReadySessionOptions {
     }
 }
 
+/// Removes what speech models write for sounds rather than speech: bracketed labels
+/// such as "(music)" or "[BLANK_AUDIO]", and whole-phrase phantom captions Whisper is
+/// known to produce on near-silence ("Thanks for watching!"). Short phrases people really
+/// dictate, like "Thank you." or "Okay.", are kept.
+enum TranscriptArtifacts {
+    static let phantomPhrases: Set<String> = [
+        "thanks for watching", "thank you for watching", "thanks for watching and see you next time",
+        "please subscribe", "subscribe to my channel", "like and subscribe"
+    ]
+    static func cleaned(_ text: String) -> String {
+        var value = text.replacingOccurrences(of: #"\s*[\(\[][^\)\]]{0,40}[\)\]]\s*"#, with: " ", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"[♪♫*]+"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let bare = value.lowercased().trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
+        return phantomPhrases.contains(bare) ? "" : value
+    }
+}
+
 // Whisper's short, independent phrase decodes can occasionally repeat the end
 // of one decode at the beginning of the next. Remove only an immediate echo;
 // separate, deliberately repeated dictation remains untouched.

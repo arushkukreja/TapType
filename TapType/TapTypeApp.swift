@@ -15,6 +15,9 @@ struct TapTypeApp: App {
         if ProcessInfo.processInfo.arguments.contains("--pipeline-tests") {
             Task { @MainActor in await PipelineChecks.run(); await IntegrationChecks.costs() }
         }
+        if ProcessInfo.processInfo.arguments.contains("--cleanup-eval") {
+            Task { @MainActor in await PipelineChecks.cleanupEval() }
+        }
         if ProcessInfo.processInfo.arguments.contains("--handoff-report") {
             setbuf(stdout, nil)
             print("HANDOFF_REPORT: \(KeyboardBridge.read("return-status.json"))")

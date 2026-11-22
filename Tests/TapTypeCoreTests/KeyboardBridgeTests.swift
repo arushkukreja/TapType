@@ -106,3 +106,16 @@ final class BridgeSignalTests: XCTestCase {
         wait(for: [unexpected], timeout: 0.5)
     }
 }
+
+final class TranscriptArtifactsTests: XCTestCase {
+    func testRemovesSoundLabels() {
+        XCTAssertEqual(TranscriptArtifacts.cleaned("(upbeat music) Send the report [BLANK_AUDIO] by Friday."), "Send the report by Friday.")
+        XCTAssertEqual(TranscriptArtifacts.cleaned("♪ ♪"), "")
+    }
+    func testDropsPhantomCaptionsOnly() {
+        XCTAssertEqual(TranscriptArtifacts.cleaned(" Thanks for watching!"), "")
+        XCTAssertEqual(TranscriptArtifacts.cleaned("Thank you."), "Thank you.")
+        XCTAssertEqual(TranscriptArtifacts.cleaned("Okay."), "Okay.")
+        XCTAssertEqual(TranscriptArtifacts.cleaned("Thank you for the update."), "Thank you for the update.")
+    }
+}
