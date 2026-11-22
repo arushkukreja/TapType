@@ -40,12 +40,15 @@ struct ModelSettingsView: View {
                 ForEach(store.models) { model in
                     HStack(spacing: 8) {
                         Button(model.name.replacingOccurrences(of: " · English", with: "")) { speechProvider = model.id }
-                            .disabled(!store.installed.contains(model.id))
+                            .disabled(!store.prepared.contains(model.id))
                             .lineLimit(1)
                         Spacer(minLength: 4)
                         if store.downloading == model.id {
                             ProgressView(value: store.fraction).frame(width: 40)
                             Button("Cancel") { store.cancelDownload() }
+                        } else if store.preparing == model.id {
+                            ProgressView()
+                            Text("Getting ready").foregroundStyle(.secondary)
                         } else if store.installed.contains(model.id) {
                             Button("Uninstall", role: .destructive) { store.remove(model.id) }
                         } else {
@@ -70,7 +73,7 @@ struct ModelSettingsView: View {
         .pickerStyle(.menu)
         .disabled(busy || store.inUse)
         .onAppear(perform: refreshConfigured)
-        .task { await apple.refresh() }
+        .task { await apple.refresh(); store.prepareInstalledModels() }
         .onChange(of: cloud) { _, presented in if !presented { refreshConfigured() } }
     }
     private func refreshConfigured() {

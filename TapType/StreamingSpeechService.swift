@@ -12,9 +12,17 @@ final class StreamingAudioSink: @unchecked Sendable {
     #endif
     private var continuation: AsyncStream<CapturedAudio>.Continuation?
     private var meter: Float = 0
+    private var recentLevels: [Float] = []
     private var dropped = false
     private(set) var discarded = 0
     var level: Float { lock.lock(); defer { lock.unlock() }; return meter }
+    /// Levels of every buffer since the last call, oldest first (about 47 per second).
+    func drainLevels() -> [Float] {
+        lock.lock(); defer { lock.unlock() }
+        let levels = recentLevels
+        recentLevels.removeAll(keepingCapacity: true)
+        return levels
+    }
     var overflowed: Bool { lock.lock(); defer { lock.unlock() }; return dropped }
     var isCapturing: Bool { lock.lock(); defer { lock.unlock() }; return continuation != nil }
     func begin() -> AsyncStream<CapturedAudio> {
@@ -24,7 +32,7 @@ final class StreamingAudioSink: @unchecked Sendable {
         continuation = pair.continuation
         return pair.stream
     }
-    func end() { lock.lock(); defer { lock.unlock() }; continuation?.finish(); continuation = nil; meter = 0 }
+    func end() { lock.lock(); defer { lock.unlock() }; continuation?.finish(); continuation = nil; meter = 0; recentLevels.removeAll() }
     func append(_ buffer: AVAudioPCMBuffer, fixture: Bool = false) {
         lock.lock(); defer { lock.unlock() }
         #if DEBUG
@@ -39,6 +47,8 @@ final class StreamingAudioSink: @unchecked Sendable {
         for i in 0..<Int(buffer.frameLength) { power += source[0][i] * source[0][i] }
         let db = 20 * log10(max(sqrt(power / Float(max(1, buffer.frameLength))), 0.00001))
         meter = max(0, min(1, (db + 55) / 45))
+        if recentLevels.count >= 64 { recentLevels.removeFirst(recentLevels.count - 63) }
+        recentLevels.append(meter)
         if case .dropped = continuation.yield(.init(buffer: copy)) { dropped = true }
     }
 }
@@ -154,44 +164,86 @@ actor PhraseSpeechService: StreamingSpeech {
     private let failure: @Sendable () async -> Void
     private var producer: Task<Void, Error>?
     private var consumer: Task<Void, Error>?
-    private var continuation: AsyncStream<(AudioClip, Double, Double)>.Continuation?
+    private var continuation: AsyncStream<(AudioClip, Double, Double, PhraseEnd)>.Continuation?
+    /// How a phrase ended. Only a pause counts as a sentence break for cleanup; breaths
+    /// and cuts rely on Whisper's punctuation.
+    enum PhraseEnd: Sendable { case pause, breath, cut }
     init(provider: SpeechProvider, selection: CloudSelection?, text: PhraseCleanupService, failure: @escaping @Sendable () async -> Void) {
         self.provider = provider; self.selection = selection; self.text = text; self.failure = failure
     }
     func start(input: AsyncStream<CapturedAudio>, format: AVAudioFormat) async throws {
-        let pair = AsyncStream<(AudioClip, Double, Double)>.makeStream(bufferingPolicy: .bufferingOldest(8))
+        // Room for about three minutes of six-second phrases, so speech keeps queueing
+        // while a model is still loading instead of failing the dictation.
+        // Each phrase carries how it ended: a pause, a short breath, or a cut mid-speech.
+        let pair = AsyncStream<(AudioClip, Double, Double, PhraseEnd)>.makeStream(bufferingPolicy: .bufferingOldest(32))
         continuation = pair.continuation
         let text = self.text, provider = self.provider, selection = self.selection, failure = self.failure
         producer = Task {
             var samples: [Float] = [], time = 0.0, began = 0.0, silence = 0.0, voiced = false
             var preRoll: [Float] = []
-            func send() throws {
-                guard voiced, !samples.isEmpty else { samples.removeAll(keepingCapacity: true); return }
-                if case .dropped = pair.continuation.yield((.init(samples: samples, sampleRate: format.sampleRate), began, time)) {
+            // Loudness of each buffer in the current phrase, to find a quiet place to split.
+            var loudness: [(offset: Int, rms: Float)] = []
+            let rate = format.sampleRate
+            // On-device models get shorter phrases for faster text. Cloud phrases stay
+            // longer: providers such as Groq bill a minimum duration per request.
+            let local = selection == nil, longest: Double = local ? 6 : 12
+            func emit(_ phrase: [Float], from start: Double, ending: PhraseEnd = .pause) throws {
+                if case .dropped = pair.continuation.yield((.init(samples: phrase, sampleRate: rate), start, start + Double(phrase.count) / rate, ending)) {
                     throw ProviderFailure(message: "Transcription couldn’t keep up. Please finish this dictation.")
                 }
-                samples.removeAll(keepingCapacity: true); voiced = false; silence = 0
+            }
+            func send(ending: PhraseEnd = .pause) throws {
+                defer { samples.removeAll(keepingCapacity: true); loudness.removeAll(keepingCapacity: true); voiced = false; silence = 0 }
+                guard voiced, !samples.isEmpty else { return }
+                try emit(samples, from: began, ending: ending)
+            }
+            /// Sends the phrase up to the quietest stretch in its last two seconds and keeps
+            /// the rest, so long unbroken speech still reaches Whisper in short pieces.
+            /// Quietness is averaged over ~150 ms so the cut lands between words, not in the
+            /// brief silence inside one (such as before a "p"). Pieces don't overlap: the
+            /// transcript treats overlapping time ranges as replacements.
+            func splitAtQuietestPoint() throws {
+                let window = Int(rate * 2), span = 3
+                var best: (index: Int, rms: Float)?
+                for index in loudness.indices where loudness[index].offset >= max(Int(rate), samples.count - window) {
+                    let around = loudness[max(0, index - span)...min(loudness.count - 1, index + span)]
+                    let mean = around.reduce(0) { $0 + $1.rms } / Float(around.count)
+                    if best == nil || mean < best!.rms { best = (index, mean) }
+                }
+                guard let best, case let cut = loudness[best.index].offset, cut > 0 else { try send(ending: .cut); return }
+                try emit(Array(samples[..<cut]), from: began, ending: .cut)
+                samples.removeFirst(cut)
+                loudness = loudness.compactMap { $0.offset >= cut ? ($0.offset - cut, $0.rms) : nil }
+                began += Double(cut) / rate
+                silence = 0
             }
             do {
                 for await packet in input {
                     try Task.checkCancellation()
                     guard packet.buffer.format == format, let channel = packet.buffer.floatChannelData?[0] else { throw CancellationError() }
-                    let count = Int(packet.buffer.frameLength), duration = Double(count) / format.sampleRate
-                    var rms: Float = 0
-                    for i in 0..<count { rms += channel[i] * channel[i] }
-                    let speech = sqrt(rms / Float(max(count, 1))) > 0.008
+                    let count = Int(packet.buffer.frameLength), duration = Double(count) / rate
+                    var power: Float = 0
+                    for i in 0..<count { power += channel[i] * channel[i] }
+                    let rms = sqrt(power / Float(max(count, 1)))
+                    let speech = rms > 0.008
                     if speech && !voiced {
-                        began = max(0, time - Double(preRoll.count) / format.sampleRate)
+                        began = max(0, time - Double(preRoll.count) / rate)
                         samples = preRoll; preRoll.removeAll(keepingCapacity: true); voiced = true
                     }
                     time += duration
                     if voiced {
+                        loudness.append((samples.count, rms))
                         samples.append(contentsOf: UnsafeBufferPointer(start: channel, count: count))
                         silence = speech ? 0 : silence + duration
-                        if silence >= 0.65 || Double(samples.count) / format.sampleRate >= 12 { try send() }
+                        let length = Double(samples.count) / rate
+                        // A short pause ends an on-device phrase once it has some length, but
+                        // only a pause of 0.65 s or more counts as a sentence break for cleanup.
+                        if silence >= 0.65 { try send() }
+                        else if local && length >= 3 && silence >= 0.3 { try send(ending: .breath) }
+                        else if length >= longest { if local { try splitAtQuietestPoint() } else { try send() } }
                     } else {
                         preRoll.append(contentsOf: UnsafeBufferPointer(start: channel, count: count))
-                        let excess = preRoll.count - Int(format.sampleRate * 0.2)
+                        let excess = preRoll.count - Int(rate * 0.2)
                         if excess > 0 { preRoll.removeFirst(excess) }
                     }
                 }
@@ -201,7 +253,7 @@ actor PhraseSpeechService: StreamingSpeech {
         consumer = Task {
             do {
                 var priorTranscript = ""
-                for await (clip, start, end) in pair.stream {
+                for await (clip, start, end, ending) in pair.stream {
                     try Task.checkCancellation()
                     let samples = try clip.mono16k()
                     let decoded: String
@@ -215,9 +267,9 @@ actor PhraseSpeechService: StreamingSpeech {
                     guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
                     if selection == nil { priorTranscript = value }
                     await text.receive(.init(start: start, end: end, text: value, isFinal: true))
-                    await text.silence(through: end)
+                    if ending == .pause { await text.silence(through: end) }
                 }
-                if selection == nil { await ModelStore.shared.releasePhraseModel() }
+                // The model stays loaded for the next dictation; releasing the mic unloads it.
             } catch {
                 if selection == nil { await ModelStore.shared.releasePhraseModel() }
                 if !Task.isCancelled { await failure() }; throw error

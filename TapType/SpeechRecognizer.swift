@@ -32,6 +32,17 @@ final class SpeechRecognizer: NSObject, ObservableObject {
             publish()
         }
     }
+    /// Apple voice processing: multi-mic noise suppression and automatic gain on the input.
+    /// On by default: it tested clearly better than the raw mic in a noisy room.
+    @Published var reducesNoise = UserDefaults.standard.object(forKey: "reducesNoise") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(reducesNoise, forKey: "reducesNoise")
+            // Voice processing can only change while the engine is stopped; a ready mic
+            // restarts with the new setting on the next dictation.
+            if !isRecording && !isStarting && engine.isRunning { releaseMicrophone(keepPolling: isProcessing) }
+            publish()
+        }
+    }
     private let engine = AVAudioEngine()
     private let sink = StreamingAudioSink()
     private var speechService: (any StreamingSpeech)?
@@ -40,6 +51,10 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     private var watchdog: Task<Void, Never>?
     private var teardown: Task<Void, Never>?
     private var timer: Timer?
+    private var commandSignal: BridgeSignal?
+    private var pendingLevels: [Double] = []
+    private var refusedStart: (id: String, reason: String)?
+    private var levelSequence = 0
     private var generation = UUID()
     private var preparationGeneration = UUID()
     private var transcriptID = UUID().uuidString
@@ -66,6 +81,14 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         NotificationCenter.default.addObserver(self, selector: #selector(interrupted), name: AVAudioSession.interruptionNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(routeChanged), name: .AVAudioEngineConfigurationChange, object: engine)
         NotificationCenter.default.addObserver(self, selector: #selector(backgrounded), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { _ in
+            Task { await ModelStore.shared.releasePhraseModel() }
+        }
+        // Handle keyboard commands (✓, ×, start) as soon as they're written, not on the next tick.
+        commandSignal = BridgeSignal(observing: .command) { [weak self] in
+            guard let self, self.timer != nil else { return }
+            self.tick()
+        }
     }
     @objc private func interrupted(_ notification: Notification) {
         guard (notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) == AVAudioSession.InterruptionType.began.rawValue else { return }
@@ -132,7 +155,15 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         let mode = CleanupMode.selected
         do {
             let provider = SpeechProvider.selected
-            if provider.downloaded { _ = try ModelStore.shared.location(provider.rawValue) }
+            if provider.downloaded {
+                _ = try ModelStore.shared.location(provider.rawValue)
+                guard ModelStore.shared.prepared.contains(provider.rawValue), ModelStore.shared.preparing == nil else {
+                    ModelStore.shared.prepareInstalledModels()
+                    throw ProviderFailure(message: "\(provider.title) is getting ready for this iPhone. The first time can take a few minutes. Try again soon, or choose Apple Speech.")
+                }
+                // Load while the first phrase is still being spoken.
+                ModelStore.shared.preload(provider.rawValue)
+            }
             let selection = try provider.cloud.map { try CloudSelection($0) }
             let cleaner: any PhraseCleaning
             if mode != .original, let cloud = WritingProvider.selected.cloud { cleaner = CloudPhraseCleaner(selection: try CloudSelection(cloud, writing: true)) }
@@ -219,6 +250,12 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     }
     private func tick() {
         performance.sample(); audioLevel = isRecording ? sink.level : 0
+        let levels = sink.drainLevels()
+        if isRecording, !levels.isEmpty {
+            // Every buffer's level since the last tick, so the keyboard can animate them smoothly.
+            pendingLevels = levels.map { (Double($0) * 100).rounded() / 100 }
+            levelSequence += 1
+        }
         if (isRecording || isStarting) && sink.overflowed {
             cleanupNotice = "Speech couldn’t keep up. Your confirmed words are kept."
             if isRecording { stop() } else { cancelDictation() }
@@ -229,7 +266,13 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         if let id = command["id"] as? String, id != lastCommand {
             lastCommand = id
             if Date().timeIntervalSince1970 - (command["time"] as? Double ?? 0) < 5 {
-                if command["action"] as? String == "start" { let id = command["requestID"] as? String ?? UUID().uuidString; Task { await start(requestID: id) } }
+                if command["action"] as? String == "start" {
+                    let id = command["requestID"] as? String ?? UUID().uuidString
+                    if isStarting || isRecording || isProcessing {
+                        // Tell the keyboard instead of ignoring it until its 5-second timeout.
+                        refusedStart = (id, isProcessing ? "Still finishing your last dictation. Tap retry in a moment." : "Already starting. Tap retry in a moment.")
+                    } else { Task { await start(requestID: id) } }
+                }
                 else if command["requestID"] as? String == transcriptID {
                     switch command["action"] as? String {
                     case "commit": commitRequested = true; awaitingConfirmation = false; stop()
@@ -248,7 +291,10 @@ final class SpeechRecognizer: NSObject, ObservableObject {
             "microphoneActive": engine.isRunning, "ready": isReadyBetweenDictations, "transcriptID": transcriptID,
             "level": audioLevel, "final": finalResult, "commitRequested": commitRequested,
             "awaitingConfirmation": awaitingConfirmation, "cleaning": isCleaning,
-            "notice": cleanupNotice ?? "", "error": errorMessage ?? ""], to: "state.json")
+            "notice": cleanupNotice ?? "", "error": errorMessage ?? "",
+            "levels": pendingLevels, "levelSequence": levelSequence,
+            "refusedStart": refusedStart?.id ?? "", "refusedReason": refusedStart?.reason ?? ""], to: "state.json")
+        BridgeSignal.post(.state)
         updateActivity()
     }
     func cancelDictation() {
@@ -267,6 +313,7 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     func stopReadiness() { if !isRecording && !isStarting { releaseMicrophone(keepPolling: isProcessing); publish() } }
     private func releaseMicrophone(keepPolling: Bool = false) {
         readiness.reset(); sessionEnabled = false; stopEngine(); endActivity()
+        if !isProcessing { Task { await ModelStore.shared.releasePhraseModel() } }
         if !keepPolling { timer?.invalidate(); timer = nil }
     }
     private func settleMicrophone() {
@@ -403,6 +450,12 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         try audio.setAllowHapticsAndSystemSoundsDuringRecording(true)
         try audio.setActive(true)
         let input = engine.inputNode
+        if input.isVoiceProcessingEnabled != reducesNoise { try input.setVoiceProcessingEnabled(reducesNoise) }
+        if reducesNoise {
+            input.isVoiceProcessingAGCEnabled = true
+            // Keep other apps' audio as loud as possible while the mic is on.
+            input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
+        }
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0 && format.channelCount > 0 else {
             throw NSError(domain: "TapType", code: 1, userInfo: [NSLocalizedDescriptionKey: "No microphone input is available."])

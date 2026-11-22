@@ -28,8 +28,12 @@ struct ContentView: View {
                             Text(ReadySessionOptions.title(minutes)).tag(minutes)
                         }
                     }.pickerStyle(.menu).disabled(speech.isStarting)
+                    Toggle("Reduce background noise", isOn: $speech.reducesNoise)
+                        .tint(.green)
+                        .disabled(speech.isStarting || speech.isRecording)
                 } footer: {
                     Text(speech.readinessMinutes == 0 ? "Mic off after each dictation." : "Mic on while ready. Idle audio discarded.")
+                    if speech.reducesNoise { Text("Uses Apple’s voice processing to focus on your voice. Other audio may get quieter while the mic is on.") }
                     if let notice = speech.activityNotice { Text(notice) }
                 }
 

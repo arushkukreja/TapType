@@ -19,6 +19,13 @@ enum PipelineChecks {
         setbuf(stdout, nil)
         var n = 0
         func check(_ yes: Bool, _ name: String) { print("PIPELINE_CHECK: \(name)=\(yes)"); assert(yes, name); n += 1 }
+        check(!LocalTextProcessor.plausible("This recording is a prototype of the Quantum Echo, featuring enhanced sound modulation and a sleek, ergonomic design.", original: "This recording is"), "cleanup_rejects_invented_ending")
+        check(LocalTextProcessor.plausible("Can you send 3 copies to Maya?", original: "um can you uh send 3 copies to Maya"), "cleanup_keeps_filler_removal")
+        var pauses = StreamingTextState()
+        pauses.receive(.init(start: 0, end: 2, text: "I am not sure whether the", isFinal: true))
+        pauses.receive(.init(start: 2, end: 4, text: "delivery can arrive before Friday", isFinal: true))
+        pauses.silence(through: 4.2)
+        check(pauses.phrases.map(\.raw) == ["I am not sure whether the delivery can arrive before Friday"], "later_pause_keeps_earlier_cut_in_sentence")
         var state = StreamingTextState()
         state.receive(.init(start: 0, end: 1, text: "Send three", isFinal: false))
         check(state.snapshot.provisional == "Send three" && state.next == nil, "volatile_visible_not_queued")
@@ -58,6 +65,12 @@ enum PipelineChecks {
         check(FoundationPhraseCleaner.validCorrection("Send 5 copies.", raw: "Send three copies. Actually, send five copies."), "explicit_correction_accepts_spoken_numbers")
         check(!FoundationPhraseCleaner.validCorrection("Send 3 copies.", raw: "Send three copies. Actually, send five copies."), "explicit_correction_preserves_corrected_value")
         check(!FoundationPhraseCleaner.validCorrection("Send 9 copies.", raw: "Send three copies. Actually, send five copies."), "explicit_correction_rejects_invented_value")
+        let meeting = "The meeting is on Tuesday. Sorry, I mean Wednesday."
+        check(!FoundationPhraseCleaner.validCorrection("The meeting is on Wednesday. Sorry, I mean Tuesday.", raw: meeting), "correction_rejects_reversed_cue")
+        check(FoundationPhraseCleaner.validCorrection("The meeting is on Wednesday.", raw: meeting), "correction_accepts_resolved_value")
+        check(FoundationPhraseCleaner.validCorrection(meeting, raw: meeting), "correction_accepts_unchanged_text")
+        check(!FoundationPhraseCleaner.validCorrection("The meeting is on Tuesday.", raw: meeting), "correction_rejects_superseded_value")
+        check(!FoundationPhraseCleaner.validCorrection("The meeting is on Wednesday in the main conference room.", raw: meeting), "correction_rejects_invented_words")
         check(FoundationPhraseCleaner.outputText("<transcript>Hello.</transcript>") == "Hello.", "cleanup_wrapper_removed")
         check(FoundationPhraseCleaner.outputText("<trans") == "" && FoundationPhraseCleaner.outputText("<transcript>Hello.</trans") == "Hello.", "partial_cleanup_wrapper_hidden")
         check(FoundationPhraseCleaner.outputText("Hello.") == "Hello.", "plain_cleanup_unchanged")
@@ -133,7 +146,7 @@ enum PipelineChecks {
             let service: any StreamingSpeech
             if args.contains("--openai-fixture") || quietOpenAI { service = OpenAIStreamingSpeech(selection: try CloudSelection(.openAI), text: text) { print("FILE_PIPELINE_SPEECH_ERROR") } }
             else if args.contains("--groq-fixture") { service = PhraseSpeechService(provider: .groq, selection: try CloudSelection(.groq), text: text) { print("FILE_PIPELINE_SPEECH_ERROR") } }
-            else if args.contains("--whisper-fixture") { service = PhraseSpeechService(provider: .base, selection: nil, text: text) { print("FILE_PIPELINE_SPEECH_ERROR") } }
+            else if args.contains("--whisper-fixture") { service = PhraseSpeechService(provider: args.contains("--whisper-turbo") ? .turbo : .base, selection: nil, text: text) { print("FILE_PIPELINE_SPEECH_ERROR") } }
             else { service = AppleSpeechService(text: text) { print("FILE_PIPELINE_SPEECH_ERROR") } }
             let input = AsyncStream<CapturedAudio>.makeStream(bufferingPolicy: .bufferingOldest(256))
             async let warm: Void = text.prepare()

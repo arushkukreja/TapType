@@ -81,3 +81,28 @@ final class TranscriptEchoReducerTests: XCTestCase {
         XCTAssertEqual(TranscriptEchoReducer.removingImmediateEchoes(from: "No, no, that is not right."), "No, no, that is not right.")
     }
 }
+
+final class BridgeSignalTests: XCTestCase {
+    @MainActor
+    func testObserverReceivesPostedSignalOnMainThread() {
+        let received = expectation(description: "signal delivered")
+        let signal = BridgeSignal(observing: .state) {
+            XCTAssertTrue(Thread.isMainThread)
+            received.fulfill()
+        }
+        BridgeSignal.post(.state)
+        wait(for: [received], timeout: 2)
+        withExtendedLifetime(signal) {}
+    }
+
+    @MainActor
+    func testReleasedObserverStopsReceiving() {
+        let unexpected = expectation(description: "no delivery after release")
+        unexpected.isInverted = true
+        var signal: BridgeSignal? = BridgeSignal(observing: .command) { unexpected.fulfill() }
+        signal = nil
+        XCTAssertNil(signal)
+        BridgeSignal.post(.command)
+        wait(for: [unexpected], timeout: 0.5)
+    }
+}

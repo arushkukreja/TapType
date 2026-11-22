@@ -90,9 +90,29 @@ actor FoundationPhraseCleaner: PhraseCleaning {
         }
         // Explicit corrections can remove superseded values, but cannot invent numeric values.
         guard numbers(text).isSubset(of: numbers(raw)) else { return false }
-        if let cue = raw.range(of: #"(?i)(actually|sorry|i mean|correction)"#, options: [.regularExpression, .backwards]) {
-            let correctionValues = numbers(String(raw[cue.upperBound...]))
+        let cuePattern = #"(?i)(actually|sorry|i mean|correction)"#
+        let words: (String) -> [String] = { value in
+            value.lowercased().replacingOccurrences(of: "’", with: "'")
+                .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "'")).inverted)
+                .filter { !$0.isEmpty }
+        }
+        // Resolving a correction only removes words; allow a couple of small joining words.
+        let rawWords = Set(words(raw)).union(numbers(raw))
+        guard words(text).filter({ !rawWords.contains($0) && Int($0) == nil }).count <= 2 else { return false }
+        if let cue = raw.range(of: cuePattern, options: [.regularExpression, .backwards]) {
+            let afterCue = String(raw[cue.upperBound...])
+            let correctionValues = numbers(afterCue)
             guard correctionValues.isSubset(of: numbers(text)) else { return false }
+            // The words the speaker corrected to must survive...
+            let cueWords: Set<String> = ["actually", "sorry", "i", "mean", "correction", "no", "rather"]
+            let corrected = Set(words(afterCue)).subtracting(cueWords).subtracting(numberWords)
+            guard corrected.isSubset(of: Set(words(text))) else { return false }
+            // ...and if the edit keeps a correction phrase, it must still point at them.
+            // Otherwise "Tuesday. Sorry, I mean Wednesday." could come back reversed.
+            if let kept = text.range(of: cuePattern, options: [.regularExpression, .backwards]) {
+                let keptAfter = String(text[kept.upperBound...])
+                guard corrected.isSubset(of: Set(words(keptAfter))), correctionValues.isSubset(of: numbers(keptAfter)) else { return false }
+            }
         }
         return true
     }
@@ -131,11 +151,32 @@ actor PhraseCleanupService {
             }
             requests += mode == .original ? 0 : 1
             let context = state.phrases.prefix(while: { $0.id != phrase.id }).last?.refined ?? ""
-            let result = await cleaner.clean(phrase, context: context, mode: mode) { [weak self] draft in
+            // When cleanup is behind, clean the waiting sentences in one request: a request
+            // costs about the same for one sentence as for several, so the backlog clears
+            // instead of growing. Corrections are still cleaned on their own.
+            var batch = [phrase]
+            if !phrase.correction {
+                for other in state.phrases.drop(while: { $0.id != phrase.id }).dropFirst() {
+                    guard other.refined == nil, !other.correction,
+                          batch.reduce(0, { $0 + $1.raw.count }) + other.raw.count <= 400 else { break }
+                    batch.append(other)
+                }
+            }
+            let request = batch.count == 1 ? phrase
+                : CleanupPhrase(id: phrase.id, raw: StreamingTextState.joined(batch.map(\.raw)), correction: false)
+            // The first phrase shows the combined draft; the others hide until it's done.
+            for other in batch.dropFirst() { state.refine(id: other.id, text: "", completed: false) }
+            let result = await cleaner.clean(request, context: context, mode: mode) { [weak self] draft in
                 await self?.partial(draft, id: phrase.id, epoch: epoch)
             }
             guard !Task.isCancelled, generation == epoch else { break }
+            guard batch.allSatisfy({ member in state.phrases.contains { $0.id == member.id && $0.raw == member.raw } }) else {
+                // The text changed underneath this request; clean it again.
+                for member in batch { state.clearDraft(id: member.id) }
+                await publish(state.snapshot); continue
+            }
             state.refine(id: phrase.id, text: result.text, completed: true)
+            for other in batch.dropFirst() { state.refine(id: other.id, text: "", completed: true) }
             if let notice = result.notice { state.notice = notice }
             await publish(state.snapshot)
             if generation == epoch && state.phase == .recording { await cleaner.prepare(mode: mode) }

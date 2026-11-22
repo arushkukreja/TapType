@@ -2,20 +2,21 @@ import Foundation
 import Security
 
 enum SpeechProvider: String, CaseIterable, Identifiable {
-    case apple, base = "base.en", small = "small.en", openAI, groq
+    case apple, base = "base.en", small = "small.en", turbo = "large-v3-turbo", openAI, groq
     var id: String { rawValue }
     var title: String {
         switch self {
         case .apple: "Apple Speech"
         case .base: "Whisper Base"
         case .small: "Whisper Small"
+        case .turbo: "Whisper Large v3 Turbo"
         case .openAI: "OpenAI"
         case .groq: "Groq"
         }
     }
     var cloud: CloudProvider? { self == .openAI ? .openAI : self == .groq ? .groq : nil }
     var modelName: String { cloud?.speechModel ?? title }
-    var downloaded: Bool { self == .base || self == .small }
+    var downloaded: Bool { self == .base || self == .small || self == .turbo }
     static var selected: Self { Self(rawValue: UserDefaults.standard.string(forKey: "speechProvider") ?? "apple") ?? .apple }
 }
 

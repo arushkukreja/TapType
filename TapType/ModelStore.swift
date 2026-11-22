@@ -34,6 +34,12 @@ final class ModelStore: ObservableObject {
     @Published private(set) var downloading: String?
     @Published private(set) var fraction: Double = 0
     @Published private(set) var inUse = false
+    /// Installed models that have been loaded once, so iOS has optimized them for this
+    /// iPhone's chip. That first load can take minutes for large models; doing it here
+    /// keeps it out of a dictation.
+    @Published private(set) var prepared: Set<String> = []
+    @Published private(set) var preparing: String?
+    private var prepareTask: Task<Void, Never>?
     @Published var notice: String?
     private var downloadTask: Task<Void, Never>?
     private var phrasePipeline: WhisperKit?
@@ -49,6 +55,32 @@ final class ModelStore: ObservableObject {
     private func folder(_ id: String) -> URL { root.appendingPathComponent(id, isDirectory: true) }
     private func refresh() {
         installed = Set(models.filter { manager.fileExists(atPath: folder($0.id).appendingPathComponent("installed").path) }.map(\.id))
+        prepared = Set(installed.filter { manager.fileExists(atPath: folder($0).appendingPathComponent("prepared").path) })
+    }
+    /// Prepares every installed model that hasn't been prepared yet, one at a time.
+    func prepareInstalledModels() {
+        guard preparing == nil, !inUse, downloading == nil,
+              let next = models.first(where: { installed.contains($0.id) && !prepared.contains($0.id) }) else { return }
+        preparing = next.id
+        let location = folder(next.id)
+        prepareTask = Task {
+            defer { preparing = nil; prepareTask = nil }
+            do {
+                // Validate locally first so WhisperKit cannot silently download a missing tokenizer.
+                _ = try await AutoTokenizerWrapper.from(modelFolder: location)
+                // prewarm loads and unloads each part in turn, which triggers and caches
+                // iOS's on-device optimization without holding the whole model in memory.
+                let pipeline = try await WhisperKit(WhisperKitConfig(modelFolder: location.path, tokenizerFolder: location,
+                    verbose: false, logLevel: .none, prewarm: true, load: false, download: false))
+                await pipeline.unloadModels()
+                try Data("1".utf8).write(to: location.appendingPathComponent("prepared"), options: .atomic)
+                refresh()
+                notice = "\(next.name) is ready. Choose it under Speech model."
+                prepareInstalledModels()
+            } catch {
+                notice = "\(next.name) couldn’t get ready. Uninstall it and download it again."
+            }
+        }
     }
     func location(_ id: String) throws -> URL {
         guard installed.contains(id) else { throw ProviderFailure(message: "Download this model in TapType’s On-device models settings first.") }
@@ -114,7 +146,8 @@ final class ModelStore: ObservableObject {
                 try Data("1".utf8).write(to: staging.appendingPathComponent("installed"), options: .atomic)
                 if manager.fileExists(atPath: folder(model.id).path) { try manager.removeItem(at: folder(model.id)) }
                 try manager.moveItem(at: staging, to: folder(model.id))
-                notice = "\(model.name) is ready. Choose it under Speech model."
+                notice = "\(model.name) downloaded. Getting it ready for this iPhone. The first time can take a few minutes."
+                Task { @MainActor in self.prepareInstalledModels() }
             } catch {
                 if Task.isCancelled { notice = "Download paused. Tap Download to continue." }
                 else { notice = (error as? ProviderFailure)?.message ?? "Download stopped. Check your connection and storage, then try again." }
@@ -123,7 +156,7 @@ final class ModelStore: ObservableObject {
     }
     func cancelDownload() { downloadTask?.cancel() }
     func remove(_ id: String) {
-        guard !inUse, downloading != id, models.contains(where: { $0.id == id }) else { return }
+        guard !inUse, downloading != id, preparing != id, loadTask?.id != id, models.contains(where: { $0.id == id }) else { return }
         guard phraseModel != id else { notice = "Finish your dictation before removing this model."; return }
         do {
             try manager.removeItem(at: folder(id))
@@ -131,38 +164,70 @@ final class ModelStore: ObservableObject {
             refresh(); notice = "Model removed."
         } catch { notice = "Couldn’t remove this model. Please try again." }
     }
+    /// Unloads the phrase model. Called when the microphone is released, on memory
+    /// warnings, and after errors; it stays loaded between dictations otherwise.
     func releasePhraseModel() async {
+        guard !inUse else { return }
+        if let load = loadTask { _ = try? await load.task.value }
         guard !inUse else { return }
         let pipeline = phrasePipeline
         phrasePipeline = nil; phraseModel = nil
         await pipeline?.unloadModels()
     }
-    func transcribe(_ samples: [Float], model id: String, keepLoaded: Bool = false) async throws -> String {
-        guard !inUse else { throw ProviderFailure(message: "A dictation is already finishing. Please wait a moment.") }
+    /// Starts loading a prepared model in the background so the first phrase of a
+    /// dictation doesn't wait for it. Does nothing if it's already loaded or loading.
+    func preload(_ id: String) {
+        guard prepared.contains(id), preparing == nil, phraseModel != id, loadTask?.id != id else { return }
+        Task { _ = try? await phrasePipeline(for: id) }
+    }
+    private var loadTask: (id: String, task: Task<WhisperKit, Error>)?
+    /// The loaded pipeline for `id`, loading it once and sharing an in-flight load.
+    private func phrasePipeline(for id: String) async throws -> WhisperKit {
+        if let existing = phrasePipeline, phraseModel == id { return existing }
+        if let load = loadTask, load.id == id { return try await load.task.value }
         let location = try location(id)
-        inUse = true; defer { inUse = false }
-        let pipeline: WhisperKit
-        if let existing = phrasePipeline, phraseModel == id { pipeline = existing }
-        else {
-            await phrasePipeline?.unloadModels(); phrasePipeline = nil; phraseModel = nil
+        let previous = phrasePipeline
+        phrasePipeline = nil; phraseModel = nil
+        await previous?.unloadModels()
+        let task = Task { () throws -> WhisperKit in
             // Validate locally first so WhisperKit cannot silently download a missing tokenizer.
             do { _ = try await AutoTokenizerWrapper.from(modelFolder: location) }
             catch { throw ProviderFailure(message: "This model’s files need to be downloaded again. Remove the model and retry its download.") }
-            try Task.checkCancellation()
-            pipeline = try await WhisperKit(WhisperKitConfig(modelFolder: location.path, tokenizerFolder: location,
+            return try await WhisperKit(WhisperKitConfig(modelFolder: location.path, tokenizerFolder: location,
                 verbose: false, logLevel: .none, prewarm: false, load: true, download: false))
-            if keepLoaded { phrasePipeline = pipeline; phraseModel = id }
         }
+        loadTask = (id, task)
+        do {
+            let pipeline = try await task.value
+            if loadTask?.id == id { loadTask = nil }
+            phrasePipeline = pipeline; phraseModel = id
+            return pipeline
+        } catch {
+            if loadTask?.id == id { loadTask = nil }
+            throw error
+        }
+    }
+    func transcribe(_ samples: [Float], model id: String, keepLoaded: Bool = false) async throws -> String {
+        guard !inUse else { throw ProviderFailure(message: "A dictation is already finishing. Please wait a moment.") }
+        guard preparing == nil else { throw ProviderFailure(message: "A downloaded model is getting ready. Try again in a few minutes, or choose Apple Speech.") }
+        inUse = true; defer { inUse = false }
+        let pipeline = try await phrasePipeline(for: id)
+        #if DEBUG
+        let decodeStart = ProcessInfo.processInfo.systemUptime
+        #endif
         do {
             try Task.checkCancellation()
             let result = try await pipeline.transcribe(audioArray: samples,
+                // Phrases reach Whisper only after the level check heard sound, so treat a
+                // phrase as silent only when Whisper is nearly certain. Its default (0.6)
+                // dropped whole phrases of real speech when they started mid-sentence.
                 decodeOptions: DecodingOptions(verbose: false, language: "en", temperatureFallbackCount: 0,
-                    skipSpecialTokens: true, withoutTimestamps: true, concurrentWorkerCount: 1))
+                    skipSpecialTokens: true, withoutTimestamps: true, noSpeechThreshold: 0.95, concurrentWorkerCount: 1))
             if !keepLoaded { await pipeline.unloadModels(); phrasePipeline = nil; phraseModel = nil }
             try Task.checkCancellation()
             let text = result.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
             #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("--whisper-fixture") { print("WHISPER_PHRASE: seconds=\(Double(samples.count) / 16000) words=\(text.split(whereSeparator: \.isWhitespace).count)") }
+            if ProcessInfo.processInfo.arguments.contains("--whisper-fixture") { print("WHISPER_PHRASE: seconds=\(Double(samples.count) / 16000) decode=\(ProcessInfo.processInfo.systemUptime - decodeStart) words=\(text.split(whereSeparator: \.isWhitespace).count) text=\(text)") }
             #endif
             guard !text.isEmpty || keepLoaded else { throw ProviderFailure(message: "We didn’t hear any speech. Please try again.") }
             return text

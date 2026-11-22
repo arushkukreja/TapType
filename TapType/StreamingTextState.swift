@@ -33,7 +33,9 @@ struct StreamingTextState: Sendable {
     private(set) var spans: [SpeechSpan] = []
     private(set) var phrases: [CleanupPhrase] = []
     private(set) var pending = ""
-    private var pauseThrough = -Double.infinity
+    /// Times of reported pauses. A span ends at a pause only when one falls between it
+    /// and the next span; a later pause says nothing about earlier span boundaries.
+    private var pauses: [Double] = []
     private(set) var recognitionEnded = false
     var notice: String?
     static func joined(_ values: [String]) -> String { values.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.joined(separator: " ") }
@@ -59,7 +61,8 @@ struct StreamingTextState: Sendable {
     }
     mutating func silence(through time: Double) {
         guard time.isFinite, phase == .recording || phase == .finalizing else { return }
-        pauseThrough = max(pauseThrough, time); rebuild()
+        if !pauses.contains(time) { pauses.append(time) }
+        rebuild()
     }
     mutating func beginStop() { if phase == .recording { phase = .finalizing } }
     mutating func finishRecognition() {
@@ -75,6 +78,9 @@ struct StreamingTextState: Sendable {
         guard phase != .cancelled && phase != .finished, let i = phrases.firstIndex(where: { $0.id == id }) else { return }
         if completed { phrases[i].refined = text; phrases[i].draft = nil }
         else { phrases[i].draft = text }
+    }
+    mutating func clearDraft(id: UUID) {
+        if let i = phrases.firstIndex(where: { $0.id == id }) { phrases[i].draft = nil }
     }
     mutating func preservePending(_ message: String) {
         notice = message
@@ -92,11 +98,13 @@ struct StreamingTextState: Sendable {
     private mutating func rebuild() {
         var units: [(String, Bool)] = [], accumulated = ""
         // Stop at the first volatile range: later finalized spans cannot jump ahead of it.
-        for span in spans {
+        for (index, span) in spans.enumerated() {
             guard span.isFinal else { break }
             accumulated = Self.joined([accumulated, span.text])
             let terminal = accumulated.last.map { ".!?。！？".contains($0) } ?? false
-            if terminal || span.end <= pauseThrough || accumulated.count >= 600 || recognitionEnded {
+            let nextStart = index + 1 < spans.count ? spans[index + 1].start : Double.infinity
+            let pausedAfter = pauses.contains { $0 >= span.end - 0.05 && $0 <= nextStart + 0.05 }
+            if terminal || pausedAfter || accumulated.count >= 600 || recognitionEnded {
                 let tokenizer = NLTokenizer(unit: .sentence); tokenizer.string = accumulated
                 tokenizer.enumerateTokens(in: accumulated.startIndex..<accumulated.endIndex) { range, _ in
                     let sentence = String(accumulated[range]).trimmingCharacters(in: .whitespacesAndNewlines)
