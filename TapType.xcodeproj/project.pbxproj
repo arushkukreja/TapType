@@ -31,6 +31,9 @@ AA2000000000000000000006 = {isa = PBXBuildFile; fileRef = AA10000000000000000000
 AA3000000000000000000001 = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/argmaxinc/WhisperKit.git"; requirement = {kind = exactVersion; version = 1.1.1; }; };
 AA3000000000000000000002 = {isa = XCSwiftPackageProductDependency; package = AA3000000000000000000001; productName = WhisperKit; };
 AA3000000000000000000003 = {isa = PBXBuildFile; productRef = AA3000000000000000000002; };
+AA3000000000000000000004 = {isa = XCLocalSwiftPackageReference; relativePath = Packages/SpeechModels; };
+AA3000000000000000000005 = {isa = XCSwiftPackageProductDependency; package = AA3000000000000000000004; productName = SpeechModels; };
+AA3000000000000000000006 = {isa = PBXBuildFile; productRef = AA3000000000000000000005; };
 
         F10000000000000000000005 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TapType/LocalTextProcessor.swift; sourceTree = SOURCE_ROOT; };
         F20000000000000000000005 = {isa = PBXBuildFile; fileRef = F10000000000000000000005; };
@@ -138,6 +141,7 @@ AA2000000000000000000018 = {isa = PBXBuildFile; fileRef = AA10000000000000000000
 			buildActionMask = 2147483647;
 			files = (
 AA3000000000000000000003,
+AA3000000000000000000006,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -203,7 +207,7 @@ AA3000000000000000000003,
                 D70000000000000000000002,
 			);
 			name = TapType;
-            packageProductDependencies = (AA3000000000000000000002, );
+            packageProductDependencies = (AA3000000000000000000002, AA3000000000000000000005, );
 			productName = TapType;
 			productReference = A20000000000000000000005 /* TapType.app */;
 			productType = "com.apple.product-type.application";
@@ -213,7 +217,7 @@ AA3000000000000000000003,
 /* Begin PBXProject section */
 		A70000000000000000000001 /* Project object */ = {
 			isa = PBXProject;
-            packageReferences = (AA3000000000000000000001, );
+            packageReferences = (AA3000000000000000000001, AA3000000000000000000004, );
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2660;

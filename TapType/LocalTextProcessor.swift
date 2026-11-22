@@ -116,6 +116,10 @@ enum LocalTextProcessor {
                 .filter { !$0.isEmpty }
         }
         let before = words(original), after = words(edited)
+        // Cleanup removes words; even a rewrite barely adds any. Many extra words mean the
+        // model invented content (for example "finishing" a sentence fragment).
+        let allowedGrowth = mode == .rewrite ? max(3, before.count * 3 / 10) : max(2, before.count / 5)
+        guard after.count <= before.count + allowedGrowth else { return false }
         let negatives: Set<String> = ["no", "not", "never", "neither", "nor", "cannot", "can't", "won't", "don't", "doesn't", "didn't", "isn't", "aren't", "wasn't", "weren't", "haven't", "hasn't", "hadn't", "shouldn't", "wouldn't", "couldn't", "mustn't"]
         guard before.filter({ negatives.contains($0) }).count == after.filter({ negatives.contains($0) }).count else { return false }
         let fillers: Set<String> = ["um", "uh", "erm", "hmm"]

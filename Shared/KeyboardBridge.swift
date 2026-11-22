@@ -88,9 +88,11 @@ enum KeyboardBridge {
         let age = Date().timeIntervalSince1970 - (read("handoff.json")["time"] as? Double ?? 0)
         return age >= 0 && age < 8
     }
+    static var group: String {
+        Bundle.main.object(forInfoDictionaryKey: "TapTypeAppGroup") as? String ?? "group.com.example.TapType"
+    }
     static var root: URL? {
-        let group = Bundle.main.object(forInfoDictionaryKey: "TapTypeAppGroup") as? String ?? "group.com.example.TapType"
-        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group)
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group)
     }
     static func write(_ value: [String: Any], to name: String) {
         guard let url = root?.appendingPathComponent(name),
@@ -105,6 +107,46 @@ enum KeyboardBridge {
     static func command(_ action: String, requestID: String = "") {
         write(["id": UUID().uuidString, "action": action, "requestID": requestID,
                "time": Date().timeIntervalSince1970], to: "command.json")
+        BridgeSignal.post(.command)
+    }
+}
+
+/// Instant wake-ups between the app and keyboard, so neither side waits for its
+/// next polling tick. Darwin notifications carry no data: the receiver still reads
+/// the shared files, and the existing timers remain as a fallback.
+final class BridgeSignal: @unchecked Sendable {
+    enum Kind: String, Sendable { case state, command }
+
+    static func name(_ kind: Kind) -> String { "\(KeyboardBridge.group).bridge.\(kind.rawValue)" }
+
+    static func post(_ kind: Kind) {
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                             CFNotificationName(name(kind) as CFString), nil, nil, true)
+    }
+
+    private let kind: Kind
+    private let handler: @MainActor () -> Void
+
+    /// Calls `handler` on the main thread whenever the other process posts `kind`.
+    /// Observation stops when this object is released.
+    init(observing kind: Kind, handler: @escaping @MainActor () -> Void) {
+        self.kind = kind
+        self.handler = handler
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                        Unmanaged.passUnretained(self).toOpaque(),
+                                        { _, observer, _, _, _ in
+                                            guard let observer else { return }
+                                            let signal = Unmanaged<BridgeSignal>.fromOpaque(observer).takeUnretainedValue()
+                                            let handler = signal.handler
+                                            DispatchQueue.main.async { MainActor.assumeIsolated { handler() } }
+                                        },
+                                        Self.name(kind) as CFString, nil, .deliverImmediately)
+    }
+
+    deinit {
+        CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                           Unmanaged.passUnretained(self).toOpaque(),
+                                           CFNotificationName(Self.name(kind) as CFString), nil)
     }
 }
 

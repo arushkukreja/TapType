@@ -129,60 +129,6 @@ private final class KeyboardReturnTargetResolver {
 }
 #endif
 
-// A short, mixing playback session makes explicit dictation cues audible in
-// Silent Mode without taking microphone ownership from the companion app.
-private final class KeyboardSounds: NSObject, AVAudioPlayerDelegate {
-    // Insertion can recreate the keyboard controller before a cue finishes.
-    static let shared = KeyboardSounds()
-    private var player: AVAudioPlayer?
-    private var sessionActive = false
-    func play(_ name: String) {
-        guard let url = Bundle.main.url(forResource: name, withExtension: "wav") else { return }
-        do {
-            player?.stop()
-            let audio = AVAudioSession.sharedInstance()
-            try audio.setCategory(.playback, mode: .default, options: .mixWithOthers)
-            try audio.setActive(true)
-            sessionActive = true
-            let next = try AVAudioPlayer(contentsOf: url)
-            next.delegate = self
-            player = next
-            let accepted = next.play()
-            #if DEBUG
-            NSLog("TapType keyboard cue: %@ accepted=%d volume=%.2f", name, accepted, Double(audio.outputVolume))
-            KeyboardBridge.write(["cue": name, "accepted": accepted, "volume": audio.outputVolume,
-                                  "route": audio.currentRoute.outputs.map { $0.portType.rawValue },
-                                  "time": Date().timeIntervalSince1970], to: "cue-status.json")
-            #endif
-            if !accepted { stop() }
-        } catch {
-            #if DEBUG
-            NSLog("TapType keyboard cue failed: %@", (error as NSError).domain)
-            #endif
-            stop()
-        }
-    }
-    func stop() {
-        player?.stop(); player = nil
-        guard sessionActive else { return }
-        sessionActive = false
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-    }
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        guard player === self.player else { return }
-        #if DEBUG
-        var report = KeyboardBridge.read("cue-status.json")
-        report["playedToEnd"] = flag
-        KeyboardBridge.write(report, to: "cue-status.json")
-        #endif
-        stop()
-    }
-    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
-        guard player === self.player else { return }
-        stop()
-    }
-}
-
 // Keep haptic playback in the visible keyboard process. No microphone or audio
 // session category is activated by this haptics-only engine.
 private final class KeyboardHaptics {
@@ -229,7 +175,17 @@ private final class KeyboardHaptics {
 }
 
 private final class KeyboardKey: UIButton {
+    /// Receives its own touches instead of going through KeyTouchStack (the globe key).
+    var passesTouches = false
+    /// Repeats while held (delete).
+    var repeats = false
+    var didRepeat = false
     private var restingColor: UIColor?
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // An explicit shadow path avoids offscreen shadow rendering for every key.
+        layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: layer.cornerRadius).cgPath
+    }
     override var isHighlighted: Bool {
         didSet {
             guard isHighlighted != oldValue else { return }
@@ -239,6 +195,107 @@ private final class KeyboardKey: UIButton {
             } else { backgroundColor = restingColor }
         }
     }
+}
+
+/// Handles all key touches the way the system keyboard does, instead of leaving each
+/// key button to track its own touch:
+/// - a touch anywhere in the key area, including the gaps between keys, goes to the
+///   nearest key;
+/// - sliding a finger moves to the key under it rather than cancelling the press;
+/// - a new finger landing commits the key under the previous finger (fast-typing rollover);
+/// - keys marked `repeats` (delete) repeat while held.
+/// Key buttons keep their UIActions; this view triggers them with `sendActions`.
+private final class KeyTouchStack: UIStackView {
+    /// Light tap feedback on every key press.
+    var onPress: (() -> Void)?
+    private var pressed: [ObjectIdentifier: (touch: UITouch, key: KeyboardKey)] = [:]
+    private var repeatTimer: Timer?
+
+    override init(frame: CGRect) { super.init(frame: frame); isMultipleTouchEnabled = true }
+    required init(coder: NSCoder) { super.init(coder: coder); isMultipleTouchEnabled = true }
+
+    private var allKeys: [KeyboardKey] {
+        arrangedSubviews.flatMap { ($0 as? UIStackView)?.arrangedSubviews ?? [] }.compactMap { $0 as? KeyboardKey }
+    }
+    /// The globe key needs real touch events for the system input-mode menu.
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        guard !isHidden, alpha > 0.01, self.point(inside: point, with: event) else { return nil }
+        if let globe = allKeys.first(where: { $0.passesTouches && $0.convert($0.bounds, to: self).contains(point) }) { return globe }
+        return self
+    }
+    /// Count touches slightly above the top row, like the system keyboard.
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        bounds.inset(by: UIEdgeInsets(top: -10, left: 0, bottom: 0, right: 0)).contains(point)
+    }
+    private func nearestKey(to point: CGPoint) -> KeyboardKey? {
+        var best: (key: KeyboardKey, distance: CGFloat)?
+        for key in allKeys where !key.passesTouches && !key.isHidden {
+            let frame = key.convert(key.bounds, to: self)
+            let dx = max(frame.minX - point.x, 0, point.x - frame.maxX)
+            let dy = max(frame.minY - point.y, 0, point.y - frame.maxY)
+            let distance = dx * dx + dy * dy
+            if distance == 0 { return key }
+            if best == nil || distance < best!.distance { best = (key, distance) }
+        }
+        return best?.key
+    }
+    private func press(_ key: KeyboardKey, for touch: UITouch) {
+        pressed[ObjectIdentifier(touch)] = (touch, key)
+        key.isHighlighted = true
+        key.sendActions(for: .touchDown)
+        onPress?()
+        if key.repeats { startRepeating(key) }
+    }
+    private func release(_ id: ObjectIdentifier, commit: Bool) {
+        guard let entry = pressed.removeValue(forKey: id) else { return }
+        entry.key.isHighlighted = false
+        stopRepeating()
+        // A held delete key already fired while repeating; don't fire once more.
+        if commit && !(entry.key.repeats && entry.key.didRepeat) { entry.key.sendActions(for: .touchUpInside) }
+        else if !commit { entry.key.sendActions(for: .touchCancel) }
+        entry.key.didRepeat = false
+    }
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        // Rollover: commit keys still held before pressing the new one.
+        for id in Array(pressed.keys) { release(id, commit: true) }
+        for touch in touches {
+            if let key = nearestKey(to: touch.location(in: self)) { press(key, for: touch) }
+        }
+    }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        for touch in touches {
+            let id = ObjectIdentifier(touch)
+            guard let entry = pressed[id], let key = nearestKey(to: touch.location(in: self)), key !== entry.key else { continue }
+            // Slid to a neighboring key: move the press there, like the system keyboard.
+            entry.key.isHighlighted = false
+            entry.key.sendActions(for: .touchDragExit)
+            stopRepeating()
+            pressed[id] = (touch, key)
+            key.isHighlighted = true
+            key.sendActions(for: .touchDragEnter)
+            if key.repeats { startRepeating(key) }
+        }
+    }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        for touch in touches { release(ObjectIdentifier(touch), commit: true) }
+    }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        for touch in touches { release(ObjectIdentifier(touch), commit: false) }
+    }
+    /// Drop any press when the keys are hidden or rebuilt mid-touch.
+    func cancelAll() { for id in Array(pressed.keys) { release(id, commit: false) } }
+    private func startRepeating(_ key: KeyboardKey) {
+        stopRepeating()
+        repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self, weak key] _ in
+            guard let self, let key else { return }
+            key.didRepeat = true
+            key.sendActions(for: .touchUpInside)
+            self.repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.09, repeats: true) { [weak key] _ in
+                key?.sendActions(for: .touchUpInside)
+            }
+        }
+    }
+    private func stopRepeating() { repeatTimer?.invalidate(); repeatTimer = nil }
 }
 
 private enum KeyboardMetrics {
@@ -319,9 +376,54 @@ private struct OpenVoiceApp: View {
     }
 }
 
+/// Scrolling level bars redrawn every frame. The app sends a burst of buffer levels
+/// about ten times a second; they play back at a steady pace and each bar eases
+/// toward its target, so motion stays continuous between bursts.
 private final class VoiceWaveform: UIView {
-    var levels: [CGFloat] = Array(repeating: 0, count: 11)
-    func push(_ level: CGFloat) { levels.removeFirst(); levels.append(level); setNeedsDisplay() }
+    private static let barCount = 11
+    private static let step: CFTimeInterval = 0.06   // seconds per bar shift
+    private static let perStep = 3                   // ≈ 47 levels/s × 0.06 s
+    private static let maxQueued = 14                // never lag the mic by more than ~0.3 s
+    private var targets = Array(repeating: CGFloat(0), count: barCount)
+    private var levels = Array(repeating: CGFloat(0), count: barCount)
+    private var queue: [CGFloat] = []
+    private var elapsed: CFTimeInterval = 0
+    private var lastFrame: CFTimeInterval = 0
+    private var link: CADisplayLink?
+
+    /// Adds captured levels, oldest first. Calling with no levels lets the bars settle to rest.
+    func enqueue(_ incoming: [CGFloat]) {
+        queue.append(contentsOf: incoming)
+        if queue.count > Self.maxQueued { queue.removeFirst(queue.count - Self.maxQueued) }
+        if link == nil, !queue.isEmpty || !atRest { start() }
+    }
+    private var atRest: Bool { (targets + levels).allSatisfy { $0 < 0.005 } }
+    private func start() {
+        guard window != nil, !isHidden else { return }
+        let link = CADisplayLink(target: DisplayLinkProxy(self), selector: #selector(DisplayLinkProxy.frame(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+        link.add(to: .main, forMode: .common)
+        self.link = link; lastFrame = 0
+    }
+    private func stop() { link?.invalidate(); link = nil }
+    override func didMoveToWindow() { super.didMoveToWindow(); if window == nil { stop() } }
+    override var isHidden: Bool { didSet { if isHidden { stop() } } }
+    fileprivate func frame(_ link: CADisplayLink) {
+        let dt = lastFrame == 0 ? 1.0 / 60 : min(0.1, link.timestamp - lastFrame)
+        lastFrame = link.timestamp
+        elapsed += dt
+        while elapsed >= Self.step {
+            elapsed -= Self.step
+            let taken = queue.prefix(Self.perStep)
+            queue.removeFirst(taken.count)
+            targets.removeFirst()
+            targets.append(taken.max() ?? (targets.last ?? 0) * 0.5)
+        }
+        let ease = CGFloat(1 - exp(-dt * 20))
+        for index in levels.indices { levels[index] += (targets[index] - levels[index]) * ease }
+        setNeedsDisplay()
+        if queue.isEmpty && atRest { stop() }
+    }
     override func draw(_ rect: CGRect) {
         UIColor.label.setFill()
         let gap: CGFloat = 13, width: CGFloat = 5
@@ -331,6 +433,16 @@ private final class VoiceWaveform: UIView {
             UIBezierPath(roundedRect: CGRect(x: origin + CGFloat(index) * gap,
                 y: (bounds.height - height) / 2, width: width, height: height), cornerRadius: 2.5).fill()
         }
+    }
+}
+
+/// Breaks the retain cycle between CADisplayLink and its target.
+private final class DisplayLinkProxy: NSObject {
+    private weak var waveform: VoiceWaveform?
+    init(_ waveform: VoiceWaveform) { self.waveform = waveform }
+    @objc func frame(_ link: CADisplayLink) {
+        guard let waveform else { link.invalidate(); return }
+        waveform.frame(link)
     }
 }
 
@@ -353,7 +465,7 @@ final class KeyboardViewController: UIInputViewController {
     private var hostInactive = false
     private var hostResumedAt: Double?
     private var sawHostInactive = false
-    private let keys = UIStackView()
+    private let keys = KeyTouchStack()
     private let keyPreview = UILabel()
     private var previewDismissal: DispatchWorkItem?
     private weak var previewKey: UIButton?
@@ -364,6 +476,10 @@ final class KeyboardViewController: UIInputViewController {
     private var linkHost: UIHostingController<OpenVoiceApp>?
     private var linkDocument = ""
     private var timer: Timer?
+    private var stateSignal: BridgeSignal?
+    private var lastRefresh: CFTimeInterval = 0
+    private var lastLevelSequence = -1
+    private var lastActionStyle = ""
     private var state: [String: Any] = [:]
     private var ticket: DictationTicket?
     private var visible = false
@@ -371,10 +487,10 @@ final class KeyboardViewController: UIInputViewController {
     private var numbers = false
     private var symbols = false
     private var localMessage: String?
-    private let sounds = KeyboardSounds.shared
     private var startHaptic: UIImpactFeedbackGenerator?
     private var finishHaptic: UINotificationFeedbackGenerator?
     private var cancelHaptic: UIImpactFeedbackGenerator?
+    private var keyHaptic: UIImpactFeedbackGenerator?
     private let directHaptics = KeyboardHaptics()
     #if DEBUG
     private let returnTargetResolver = KeyboardReturnTargetResolver.shared
@@ -514,11 +630,14 @@ final class KeyboardViewController: UIInputViewController {
             startHaptic = UIImpactFeedbackGenerator(style: .medium, view: actionSlot)
             finishHaptic = UINotificationFeedbackGenerator(view: actionSlot)
             cancelHaptic = UIImpactFeedbackGenerator(style: .light, view: left)
+            keyHaptic = UIImpactFeedbackGenerator(style: .light, view: keys)
         } else {
             startHaptic = UIImpactFeedbackGenerator(style: .medium)
             finishHaptic = UINotificationFeedbackGenerator()
             cancelHaptic = UIImpactFeedbackGenerator(style: .light)
+            keyHaptic = UIImpactFeedbackGenerator(style: .light)
         }
+        keys.onPress = { [weak self] in self?.keyHaptic?.impactOccurred(intensity: 0.5); self?.keyHaptic?.prepare() }
         toolbar.addArrangedSubview(left); toolbar.addArrangedSubview(settingsSlot)
         toolbar.addArrangedSubview(status); toolbar.addArrangedSubview(actionSlot)
         keys.axis = .vertical; keys.spacing = 8; keys.distribution = .fillEqually
@@ -591,7 +710,7 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         upper = true
-        visible = true; lastLayout = ""; localMessage = nil
+        visible = true; lastLayout = ""; lastActionStyle = ""; localMessage = nil
         UIView.performWithoutAnimation { refresh(); view.layoutIfNeeded() }
         let transition = KeyboardBridge.read("keyboard-transition.json")
         if let id = transition["id"] as? String,
@@ -600,18 +719,31 @@ final class KeyboardViewController: UIInputViewController {
             coverTransition(id: id, created: created)
         }
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.refresh() }
+        // The app signals each state change, so refresh immediately. The timer is a
+        // fallback (and notices a stopped app); skip it when a signal just refreshed.
+        stateSignal = BridgeSignal(observing: .state) { [weak self] in
+            guard let self, self.visible else { return }
+            self.refresh()
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self, CACurrentMediaTime() - self.lastRefresh > 0.08 else { return }
+            self.refresh()
+        }
     }
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        startHaptic?.prepare(); finishHaptic?.prepare(); cancelHaptic?.prepare()
+        // iOS hides its own mic below the keyboard only after the host app receives this
+        // flag while TapType is the active keyboard. Setting it in viewDidLoad alone can
+        // arrive before the keyboard is connected to the host, so send it again here.
+        hasDictationKey = true
+        startHaptic?.prepare(); finishHaptic?.prepare(); cancelHaptic?.prepare(); keyHaptic?.prepare()
         if hasFullAccess { directHaptics.prepare() }
         traceTransition("appeared")
         updateTransition()
     }
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        visible = false; timer?.invalidate(); timer = nil
+        visible = false; timer?.invalidate(); timer = nil; stateSignal = nil
         hideKeyPreview()
         traceTransition("disappearing")
     }
@@ -696,7 +828,6 @@ final class KeyboardViewController: UIInputViewController {
     private func playStartFeedback() {
         logFeedbackRequest("start", generator: startHaptic)
         if !directHaptics.play("start") { startHaptic?.impactOccurred(intensity: 0.8) }
-        sounds.play("Start")
         startHaptic?.prepare()
     }
     private func playFinishFeedback() {
@@ -715,6 +846,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func refresh() {
+        lastRefresh = CACurrentMediaTime()
         updateTransition()
         guard let document else { return }
         // Keep our controls in the same appearance as the system keyboard surface.
@@ -727,8 +859,8 @@ final class KeyboardViewController: UIInputViewController {
         if visible, let ticket, let text = ticket.textToInsert(from: state, document: document, insertedID: insertedID) {
             // Persist before insertion: a keyboard reload cannot replay a completed dictation.
             KeyboardBridge.write(["id": ticket.id], to: "inserted.json")
-            sounds.play("Complete")
             textDocumentProxy.insertText(text)
+            keyHaptic?.impactOccurred(intensity: 0.7)
             DictationLatency.mark("inserted", id: ticket.id)
             KeyboardBridge.command("clear", requestID: ticket.id)
             if state["microphoneActive"] as? Bool == false { KeyboardBridge.write([:], to: "state.json") }
@@ -747,9 +879,10 @@ final class KeyboardViewController: UIInputViewController {
         left.isHidden = !active
         settingsSlot.isHidden = active
         let waiting = ticket != nil && !matches && alive
+        let refused = waiting && state["refusedStart"] as? String == ticket?.id ? state["refusedReason"] as? String : nil
         let timedOut = waiting && Date().timeIntervalSince1970 - (ticket?.created ?? 0) > 5
-        let error = matches ? state["error"] as? String ?? "" : timedOut ? "Couldn’t start dictation. Tap retry." : ""
-        let busy = processing || preparing || (waiting && !timedOut)
+        let error = matches ? state["error"] as? String ?? "" : refused ?? (timedOut ? "Couldn’t start dictation. Tap retry." : "")
+        let busy = processing || preparing || (waiting && !timedOut && refused == nil)
         if active { hideKeyPreview() }
         keys.isHidden = active
         listening.isHidden = !active
@@ -767,7 +900,11 @@ final class KeyboardViewController: UIInputViewController {
         listeningLabel.text = preparing ? "Getting ready…" : !error.isEmpty ? error : finished ? "Ready to insert" : !alive ? "Open TapType to reconnect" :
             state["awaitingConfirmation"] as? Bool == true ? "Tap ✓ to finish" : processing ? (state["cleaning"] as? Bool == true ? "Cleaning up…" : "Finishing…") : recording ? "Listening\niPhone Microphone" : "Connecting…"
         if ticket?.document != document && finished { listeningLabel.text = "Text ready\nTap ✓ to insert here" }
-        listeningLabel.font = .systemFont(ofSize: error.isEmpty ? 20 : 14)
+        // Show the words as they're recognized; the newest stay visible.
+        let live = recording && error.isEmpty ? (state["live"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        if !live.isEmpty { listeningLabel.text = live }
+        listeningLabel.font = .systemFont(ofSize: !error.isEmpty ? 14 : live.isEmpty ? 20 : 17)
+        listeningLabel.lineBreakMode = live.isEmpty ? .byTruncatingTail : .byTruncatingHead
         listeningLabel.numberOfLines = 3
         let showLogo = processing && error.isEmpty
         if processingLogo.isHidden == showLogo {
@@ -778,24 +915,41 @@ final class KeyboardViewController: UIInputViewController {
         waveform.isHidden = showLogo
         listeningLabel.isHidden = showLogo
         if showLogo { status.text = "" }
-        waveform.push(recording ? CGFloat(state["level"] as? Double ?? 0) : 0)
+        if recording {
+            if let sequence = state["levelSequence"] as? Int {
+                if sequence != lastLevelSequence {
+                    lastLevelSequence = sequence
+                    waveform.enqueue((state["levels"] as? [Double] ?? []).map { CGFloat($0) })
+                }
+            } else {
+                // An app build without level bursts: one level per refresh.
+                waveform.enqueue([CGFloat(state["level"] as? Double ?? 0)])
+            }
+        } else {
+            waveform.enqueue([])
+        }
         waveform.accessibilityLabel = "Microphone input level"
         waveform.accessibilityValue = String(Int((state["level"] as? Double ?? 0) * 100))
         action.backgroundColor = .clear
         action.tintColor = .label
         spinner.color = action.tintColor
-        var config = UIButton.Configuration.plain()
-        config.baseForegroundColor = .label
-        config.image = busy ? nil : UIImage(systemName: !error.isEmpty ? "arrow.clockwise" : active ? "checkmark" : "waveform",
-            withConfiguration: branded ? UIImage.SymbolConfiguration(pointSize: 18, weight: .medium) : toolbarSymbol)
-        config.contentInsets = .zero
-        if branded {
-            config.attributedTitle = AttributedString(appName, attributes: AttributeContainer([.font: UIFont.systemFont(ofSize: 15, weight: .semibold)]))
-            config.imagePadding = 6
-            config.background.backgroundColor = UIColor.label.withAlphaComponent(0.08)
-            config.background.cornerRadius = 22
+        // Rebuilding the configuration re-lays out the button, so only do it when its look changes.
+        let actionStyle = "\(busy)|\(error.isEmpty)|\(active)|\(branded)|\(appName)"
+        if actionStyle != lastActionStyle {
+            lastActionStyle = actionStyle
+            var config = UIButton.Configuration.plain()
+            config.baseForegroundColor = .label
+            config.image = busy ? nil : UIImage(systemName: !error.isEmpty ? "arrow.clockwise" : active ? "checkmark" : "waveform",
+                withConfiguration: branded ? UIImage.SymbolConfiguration(pointSize: 18, weight: .medium) : toolbarSymbol)
+            config.contentInsets = .zero
+            if branded {
+                config.attributedTitle = AttributedString(appName, attributes: AttributeContainer([.font: UIFont.systemFont(ofSize: 15, weight: .semibold)]))
+                config.imagePadding = 6
+                config.background.backgroundColor = UIColor.label.withAlphaComponent(0.08)
+                config.background.cornerRadius = 22
+            }
+            action.configuration = config
         }
-        action.configuration = config
         action.accessibilityLabel = !error.isEmpty ? "Retry dictation" : active ? "Finish and insert" : "\(appName), start dictation"
         action.isEnabled = !busy
         if busy { spinner.startAnimating() } else { spinner.stopAnimating() }
@@ -915,6 +1069,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func rebuildKeys() {
+        keys.cancelAll()
         keys.arrangedSubviews.forEach { keys.removeArrangedSubview($0); $0.removeFromSuperview() }
         if !numbers {
             addRow(Array("qwertyuiop").map(String.init), inset: 0)
@@ -922,7 +1077,7 @@ final class KeyboardViewController: UIInputViewController {
             let row = rowStack()
             row.addArrangedSubview(key("", symbol: upper ? "shift.fill" : "shift", special: true) { [weak self] in self?.upper.toggle(); self?.refresh() })
             for c in Array("zxcvbnm") { row.addArrangedSubview(letter(String(c))) }
-            row.addArrangedSubview(key("", symbol: "delete.left", special: true) { [weak self] in self?.textDocumentProxy.deleteBackward() })
+            row.addArrangedSubview(deleteKey())
             keys.addArrangedSubview(row)
         } else {
             addRow(symbols ? ["[","]","{","}","#","%","^","*","+","="] : Array("1234567890").map(String.init), inset: 0)
@@ -930,7 +1085,7 @@ final class KeyboardViewController: UIInputViewController {
             let row = rowStack()
             row.addArrangedSubview(key(symbols ? "123" : "#+=", special: true) { [weak self] in self?.symbols.toggle(); self?.refresh() })
             for c in [".",",","?","!","'"] { row.addArrangedSubview(letter(c)) }
-            row.addArrangedSubview(key("", symbol: "delete.left", special: true) { [weak self] in self?.textDocumentProxy.deleteBackward() })
+            row.addArrangedSubview(deleteKey())
             keys.addArrangedSubview(row)
         }
         let bottom = rowStack(); bottom.distribution = .fill
@@ -941,6 +1096,8 @@ final class KeyboardViewController: UIInputViewController {
             let globe = key("", symbol: "globe", special: true) { }
             globe.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
             globe.accessibilityLabel = "Next keyboard"
+            (globe as? KeyboardKey)?.passesTouches = true
+            globe.isUserInteractionEnabled = true
             bottom.addArrangedSubview(globe)
             globe.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.12).isActive = true
         }
@@ -960,6 +1117,12 @@ final class KeyboardViewController: UIInputViewController {
         bottom.addArrangedSubview(enter)
         enter.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.23).isActive = true
         keys.addArrangedSubview(bottom)
+    }
+    private func deleteKey() -> UIButton {
+        let delete = key("", symbol: "delete.left", special: true) { [weak self] in self?.textDocumentProxy.deleteBackward() }
+        (delete as? KeyboardKey)?.repeats = true
+        delete.accessibilityLabel = "Delete"
+        return delete
     }
     private func rowStack() -> UIStackView {
         let row = UIStackView(); row.axis = .horizontal; row.spacing = 6; row.distribution = .fillEqually; return row
@@ -1029,6 +1192,8 @@ final class KeyboardViewController: UIInputViewController {
         button.layer.shadowColor = UIColor.black.cgColor; button.layer.shadowOpacity = 0.16
         button.layer.shadowOffset = CGSize(width: 0, height: 1); button.layer.shadowRadius = 0
         button.addAction(UIAction { _ in action() }, for: .touchUpInside)
+        // KeyTouchStack routes touches; the globe key re-enables this for itself.
+        button.isUserInteractionEnabled = false
         return button
     }
 }
