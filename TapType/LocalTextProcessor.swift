@@ -151,6 +151,17 @@ enum LocalTextProcessor {
         let fillers: Set<String> = ["um", "uh", "erm", "hmm", "like", "basically", "yeah", "okay", "so", "actually", "literally", "kinda", "kind", "sort", "know", "mean"]
         let sourceWords = Set(before).subtracting(fillers)
         guard !sourceWords.isEmpty else { return nil }
+        // Clean up removes fillers and repeats, not meaning: at most two meaningful words may
+        // go (long run-on sentences would otherwise hide a dropped clause in the percentages).
+        if mode != .rewrite {
+            // Count occurrences: a word repeated elsewhere in the text can still be dropped here.
+            var remaining = Dictionary(after.map { ($0, 1) }, uniquingKeysWith: +)
+            var droppedMeaning: [String] = []
+            for word in before where !fillers.contains(word) && !joining.contains(word) && !isNumber(word) {
+                if let count = remaining[word], count > 0 { remaining[word] = count - 1 } else { droppedMeaning.append(word) }
+            }
+            guard droppedMeaning.count <= 2 else { return "dropped \(droppedMeaning)" }
+        }
         // Every sentence must survive on its own: when several are edited together, one
         // losing half its words would otherwise hide inside the overall count.
         let kept = Set(after)

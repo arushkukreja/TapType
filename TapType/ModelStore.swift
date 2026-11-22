@@ -289,6 +289,39 @@ final class ModelStore: ObservableObject {
             throw (error as? ProviderFailure) ?? ProviderFailure(message: "This model couldn’t finish. Try a shorter dictation or choose Apple Speech.")
         }
     }
+    /// Parakeet words with times relative to the start of `samples` (16 kHz mono).
+    func parakeetWords(_ samples: [Float], model id: String) async throws -> [TimedWord] {
+        guard !inUse else { throw ProviderFailure(message: "A dictation is already finishing. Please wait a moment.") }
+        guard preparing == nil else { throw ProviderFailure(message: "A downloaded model is getting ready. Try again in a few minutes, or choose Apple Speech.") }
+        inUse = true; defer { inUse = false }
+        let manager = try await parakeet(for: id)
+        do {
+            try Task.checkCancellation()
+            var state = TdtDecoderState.make()
+            let result = try await manager.transcribe(samples, decoderState: &state)
+            try Task.checkCancellation()
+            guard let timings = result.tokenTimings, !timings.isEmpty else {
+                let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let seconds = Double(samples.count) / 16_000
+                return text.isEmpty ? [] : [TimedWord(text: " " + text, start: 0, end: seconds)]
+            }
+            // Group sub-word tokens into words; a leading space starts a new word.
+            var words: [TimedWord] = []
+            for token in timings {
+                if token.token.hasPrefix(" ") || words.isEmpty {
+                    words.append(TimedWord(text: token.token, start: token.startTime, end: token.endTime))
+                } else if let last = words.popLast() {
+                    words.append(TimedWord(text: last.text + token.token, start: last.start, end: token.endTime))
+                }
+            }
+            return words
+        } catch {
+            await manager.cleanup()
+            parakeetManager = nil; parakeetModel = nil
+            if error is CancellationError { throw error }
+            throw ProviderFailure(message: "Parakeet couldn’t finish. Try again or choose Apple Speech.")
+        }
+    }
     private func transcribeWithParakeet(_ samples: [Float], model id: String) async throws -> String {
         let manager = try await parakeet(for: id)
         #if DEBUG

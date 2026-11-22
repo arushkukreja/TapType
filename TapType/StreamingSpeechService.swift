@@ -245,7 +245,8 @@ actor PhraseSpeechService: StreamingSpeech {
             // boundary (it starts a new sentence there), and the live preview shows the words
             // in the meantime. Whisper takes ~1.2 s per phrase, so it keeps short ones.
             let local = selection == nil, fast = ModelStore.isParakeet(provider.rawValue)
-            let longest: Double = !local || fast ? 12 : 6
+            // Parakeet's 10 s plus held-back audio from the last cut fits its 15 s window.
+            let longest: Double = !local ? 12 : fast ? 10 : 6
             func emit(_ phrase: [Float], from start: Double, ending: PhraseEnd = .pause) throws {
                 if case .dropped = pair.continuation.yield((.init(samples: phrase, sampleRate: rate), start, start + Double(phrase.count) / rate, ending)) {
                     throw ProviderFailure(message: "Transcription couldn’t keep up. Please finish this dictation.")
@@ -309,6 +310,16 @@ actor PhraseSpeechService: StreamingSpeech {
                 try send(); pair.continuation.finish()
             } catch { pair.continuation.finish(); if !Task.isCancelled { await failure() }; throw error }
         }
+        if selection == nil && ModelStore.isParakeet(provider.rawValue) {
+            consumer = Task {
+                do { try await Self.consumeWithBoundaryWindow(pair.stream, provider: provider, text: text) }
+                catch {
+                    await ModelStore.shared.releasePhraseModel()
+                    if !Task.isCancelled { await failure() }; throw error
+                }
+            }
+            return
+        }
         consumer = Task {
             do {
                 var priorTranscript = ""
@@ -331,9 +342,50 @@ actor PhraseSpeechService: StreamingSpeech {
                 }
                 // The model stays loaded for the next dictation; releasing the mic unloads it.
             } catch {
+                #if DEBUG
+                print("PHRASE_SPEECH_ERROR: \((error as? ProviderFailure)?.message ?? String(describing: error))")
+                #endif
                 if selection == nil { await ModelStore.shared.releasePhraseModel() }
                 if !Task.isCancelled { await failure() }; throw error
             }
+        }
+    }
+    /// Parakeet: decodes each phrase together with the held-back end of the previous one,
+    /// so words at a mid-speech cut are decided with the audio on both sides of them.
+    private static func consumeWithBoundaryWindow(_ phrases: AsyncStream<(AudioClip, Double, Double, PhraseEnd)>,
+                                                  provider: SpeechProvider, text: PhraseCleanupService) async throws {
+        var window = PhraseBoundaryWindow()
+        var held: [Float] = [], heldStart = 0.0, lastSpanEnd = -Double.infinity
+        let rate = 16_000.0
+        for await (clip, start, end, ending) in phrases {
+            try Task.checkCancellation()
+            let fresh = try clip.mono16k()
+            // Held audio always ends exactly where a cut phrase begins.
+            let audio = held + fresh
+            let audioStart = held.isEmpty ? start : heldStart
+            let audioEnd = audioStart + Double(audio.count) / rate
+            let words = try await ModelStore.shared.parakeetWords(audio, model: provider.rawValue).map {
+                TimedWord(text: $0.text, start: audioStart + $0.start, end: audioStart + $0.end)
+            }
+            let (commit, keepFrom) = window.split(words, audioEnd: audioEnd, atPause: ending != .cut)
+            if let keepFrom {
+                let offset = min(audio.count, max(0, Int((keepFrom - audioStart) * rate)))
+                held = Array(audio[offset...]); heldStart = audioStart + Double(offset) / rate
+            } else { held = []; heldStart = 0 }
+            let value = TranscriptArtifacts.cleaned(commit.map(\.text).joined())
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--whisper-fixture") {
+                print("PARAKEET_WINDOW: audio=\(String(format: "%.1f", audioStart))-\(String(format: "%.1f", audioEnd)) commit=\(value) held=\(String(format: "%.1f", Double(held.count) / rate))s")
+            }
+            #endif
+            guard !value.isEmpty, let first = commit.first, let last = commit.last else { continue }
+            // Committed spans must not overlap (the transcript treats overlap as a replacement):
+            // each starts after the previous one and ends where the held words begin.
+            let spanStart = max(first.start, lastSpanEnd + 0.001)
+            let spanEnd = max(spanStart + 0.01, keepFrom == nil ? max(end, last.end) : window.committedThrough)
+            lastSpanEnd = spanEnd
+            await text.receive(.init(start: spanStart, end: spanEnd, text: value, isFinal: true))
+            if ending == .pause { await text.silence(through: spanEnd) }
         }
     }
     func finish() async throws { try await producer?.value; try await consumer?.value; await text.finishRecognition() }

@@ -229,6 +229,54 @@ enum ReadySessionOptions {
     }
 }
 
+/// A recognized word with its time in the recording, in seconds.
+struct TimedWord: Equatable, Sendable {
+    /// Includes a leading space when it starts a new word (punctuation attaches without one).
+    let text: String
+    let start: Double
+    let end: Double
+    var center: Double { (start + end) / 2 }
+}
+
+/// Decides which words are final when long speech is cut without a pause. Words near a
+/// cut are guessed without hearing what follows, so the model may end a sentence there
+/// or mishear a word. Only words ending well before the cut are committed; the rest are
+/// decoded again with the next phrase, together with some audio already committed so the
+/// model knows the sentence is continuing. Times are absolute; overlapping decodes are
+/// reconciled by keeping only words centered after the last committed point.
+struct PhraseBoundaryWindow {
+    static let rightContext = 1.5
+    static let leftContext = 2.0
+    /// Never hold back more than this much audio; commit everything instead.
+    static let maxCarry = 8.0
+    private(set) var committedThrough = -Double.infinity
+
+    /// `words` come from decoding audio that ends at `audioEnd`. `atPause` means the phrase
+    /// ended in silence (or the recording ended), so every word can be committed. Returns
+    /// the words to commit and where the next decode's audio should start, or nil to carry none.
+    mutating func split(_ words: [TimedWord], audioEnd: Double, atPause: Bool) -> (commit: [TimedWord], keepFrom: Double?) {
+        let fresh = words.filter { $0.center >= committedThrough }
+        let limit = audioEnd - Self.rightContext
+        guard !atPause, let next = fresh.firstIndex(where: { $0.end > limit }) else {
+            committedThrough = audioEnd
+            return (fresh, nil)
+        }
+        // Don't cut inside a word: a token without a leading space continues the previous one.
+        var boundary = next
+        while boundary > 0, !fresh[boundary].text.hasPrefix(" ") { boundary -= 1 }
+        let commit = Array(fresh[..<boundary])
+        let held = fresh[boundary...]
+        guard let first = held.first, audioEnd - first.start <= Self.maxCarry else {
+            committedThrough = audioEnd
+            return (fresh, nil)
+        }
+        if let last = commit.last { committedThrough = (last.end + first.start) / 2 }
+        else { committedThrough = max(committedThrough, first.start - 0.04) }
+        return (commit, max(0, first.start - Self.leftContext))
+    }
+    mutating func reset() { committedThrough = -Double.infinity }
+}
+
 /// Removes what speech models write for sounds rather than speech: bracketed labels
 /// such as "(music)" or "[BLANK_AUDIO]", and whole-phrase phantom captions Whisper is
 /// known to produce on near-silence ("Thanks for watching!"). Short phrases people really

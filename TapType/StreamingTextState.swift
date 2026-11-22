@@ -135,8 +135,35 @@ struct StreamingTextState: Sendable {
         return .init(raw: Self.joined(spans.map(\.text)), provisional: provisional, finalized: finalized,
                      refined: refined, display: display, notice: notice)
     }
+    /// Where the unfinished last sentence begins, when earlier sentences in `text` are complete.
+    static func unfinishedTail(of text: String) -> String.Index? {
+        let tokenizer = NLTokenizer(unit: .sentence); tokenizer.string = text
+        var lastStart: String.Index?
+        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in lastStart = range.lowerBound; return true }
+        guard let start = lastStart, start > text.startIndex else { return nil }
+        let last = text[start...].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let end = last.last, !".!?。！？".contains(end) else { return nil }
+        return start
+    }
     private mutating func rebuild() {
         var units: [(String, Bool)] = [], accumulated = ""
+        func commit(_ text: String) {
+            let tokenizer = NLTokenizer(unit: .sentence); tokenizer.string = text
+            tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+                let sentence = String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !sentence.isEmpty {
+                    // Bound each request without cutting a word in half.
+                    var chunk = ""
+                    for word in sentence.split(whereSeparator: \.isWhitespace) {
+                        if chunk.count + word.count > 600 && !chunk.isEmpty { units.append((chunk, false)); chunk = "" }
+                        chunk = Self.joined([chunk, String(word)])
+                    }
+                    if !chunk.isEmpty { units.append((chunk, false)) }
+                }
+                return true
+            }
+        }
+        let finalCount = spans.prefix(while: \.isFinal).count
         // Stop at the first volatile range: later finalized spans cannot jump ahead of it.
         for (index, span) in spans.enumerated() {
             guard span.isFinal else { break }
@@ -144,22 +171,14 @@ struct StreamingTextState: Sendable {
             let terminal = accumulated.last.map { ".!?。！？".contains($0) } ?? false
             let nextStart = index + 1 < spans.count ? spans[index + 1].start : Double.infinity
             let pausedAfter = pauses.contains { $0 >= span.end - 0.05 && $0 <= nextStart + 0.05 }
-            if terminal || pausedAfter || accumulated.count >= 600 || recognitionEnded {
-                let tokenizer = NLTokenizer(unit: .sentence); tokenizer.string = accumulated
-                tokenizer.enumerateTokens(in: accumulated.startIndex..<accumulated.endIndex) { range, _ in
-                    let sentence = String(accumulated[range]).trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !sentence.isEmpty {
-                        // Bound each request without cutting a word in half.
-                        var chunk = ""
-                        for word in sentence.split(whereSeparator: \.isWhitespace) {
-                            if chunk.count + word.count > 600 && !chunk.isEmpty { units.append((chunk, false)); chunk = "" }
-                            chunk = Self.joined([chunk, String(word)])
-                        }
-                        if !chunk.isEmpty { units.append((chunk, false)) }
-                    }
-                    return true
-                }
-                accumulated = ""
+            // Recognition ending closes only the last sentence, not every span: spans can end
+            // mid-sentence, and cleaning half a sentence on its own changes it.
+            if terminal || pausedAfter || accumulated.count >= 600 || (recognitionEnded && index == finalCount - 1) {
+                commit(accumulated); accumulated = ""
+            } else if let unfinished = Self.unfinishedTail(of: accumulated) {
+                // Sentences finished inside this span can be cleaned now; the rest waits.
+                commit(String(accumulated[..<unfinished]))
+                accumulated = String(accumulated[unfinished...]).trimmingCharacters(in: .whitespaces)
             }
         }
         pending = accumulated

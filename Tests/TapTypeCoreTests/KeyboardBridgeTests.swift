@@ -119,3 +119,40 @@ final class TranscriptArtifactsTests: XCTestCase {
         XCTAssertEqual(TranscriptArtifacts.cleaned("Thank you for the update."), "Thank you for the update.")
     }
 }
+
+final class PhraseBoundaryWindowTests: XCTestCase {
+    private func words(_ items: [(String, Double, Double)]) -> [TimedWord] { items.map { TimedWord(text: $0.0, start: $0.1, end: $0.2) } }
+
+    func testPauseCommitsEverything() {
+        var window = PhraseBoundaryWindow()
+        let result = window.split(words([(" Hello", 0, 0.5), (" there.", 0.5, 1.0)]), audioEnd: 1.2, atPause: true)
+        XCTAssertEqual(result.commit.map(\.text).joined(), " Hello there.")
+        XCTAssertNil(result.keepFrom)
+    }
+
+    func testCutHoldsBackWordsNearTheEnd() {
+        var window = PhraseBoundaryWindow()
+        let first = window.split(words([(" so", 8.0, 8.3), (" we", 8.4, 8.6), (" can", 8.7, 9.0), (" check", 10.9, 11.3), (" out.", 11.4, 11.9)]),
+                                 audioEnd: 12.0, atPause: false)
+        XCTAssertEqual(first.commit.map(\.text).joined(), " so we can")
+        XCTAssertEqual(first.keepFrom ?? -1, 8.9, accuracy: 0.001)
+        // The next decode overlaps the committed words; only new ones are kept.
+        let second = window.split(words([(" can", 8.95, 9.0), (" check", 10.9, 11.3), (" that", 11.4, 11.7), (" the", 11.8, 12.0), (" text.", 12.1, 12.6)]),
+                                  audioEnd: 13.0, atPause: true)
+        XCTAssertEqual(second.commit.map(\.text).joined(), " check that the text.")
+    }
+
+    func testDoesNotSplitInsideAWord() {
+        var window = PhraseBoundaryWindow()
+        let result = window.split(words([(" pro", 9.0, 9.5), ("posal", 10.6, 11.0), (" to", 11.1, 11.3)]), audioEnd: 12.0, atPause: false)
+        XCTAssertEqual(result.commit, [])
+        XCTAssertEqual(result.keepFrom ?? -1, 7.0, accuracy: 0.001)
+    }
+
+    func testCommitsEverythingRatherThanCarryingTooMuch() {
+        var window = PhraseBoundaryWindow()
+        let result = window.split(words([(" word", 1.0, 1.5)]), audioEnd: 12.0, atPause: false)
+        XCTAssertEqual(result.commit.count, 1)
+        XCTAssertNil(result.keepFrom)
+    }
+}
