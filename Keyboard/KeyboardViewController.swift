@@ -21,7 +21,8 @@ private final class KeyboardReturnTargetResolver {
         var mappedCount = 0
     }
 
-    private var returnTargets = HostReturnCache()
+    // Shared through the app group so a fresh keyboard process still knows earlier hosts.
+    private var returnTargets = HostReturnCache(KeyboardBridge.read("host-cache.json"))
     private(set) var snapshot = Snapshot()
     private static var enabledReplacement: IMP?
 
@@ -41,13 +42,23 @@ private final class KeyboardReturnTargetResolver {
         return nil
     }
 
+    /// Notes the host app while the keyboard is showing in it, before any tap, so a tap
+    /// still knows where to return when iOS briefly reports the Home Screen instead.
+    func learn(for controller: UIInputViewController) {
+        Self.enableArbiterIfNeeded()
+        guard let client = Self.arbiterClient() else { return }
+        _ = currentHost(client: client, controller: controller)
+    }
+
     private func currentHost(client: NSObject, controller: UIInputViewController) -> String? {
         let hostPID = Self.integerValue(controller, selector: "_hostProcessIdentifier") ?? 0
         let state = Self.objectValue(client, selector: "currentClientState") as? NSObject
         let statePID = state.flatMap { Self.integerValue($0, selector: "processIdentifier") } ?? 0
         let stateBundle = state.flatMap { Self.objectValue($0, selector: "sourceBundleIdentifier") as? String } ?? ""
-        if statePID > 0, Self.validBundle(stateBundle) {
+        if statePID > 0, Self.validBundle(stateBundle), stateBundle != "com.apple.springboard" {
+            let before = returnTargets.bundle(for: statePID, now: ProcessInfo.processInfo.systemUptime)
             returnTargets.observe(pid: statePID, bundle: stateBundle, now: ProcessInfo.processInfo.systemUptime)
+            if before != stateBundle { KeyboardBridge.write(returnTargets.dictionary, to: "host-cache.json") }
         }
         snapshot = Snapshot(hostPID: hostPID, statePID: statePID,
                             stateBundle: stateBundle, mappedCount: returnTargets.count)
@@ -838,6 +849,9 @@ final class KeyboardViewController: UIInputViewController {
         if hasFullAccess { directHaptics.prepare() }
         traceTransition("appeared")
         updateTransition()
+        #if DEBUG
+        if hasFullAccess { returnTargetResolver.learn(for: self) }
+        #endif
     }
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
@@ -848,6 +862,9 @@ final class KeyboardViewController: UIInputViewController {
 
     @objc private func hostActivityChanged(_ note: Notification) {
         if note.name == .NSExtensionHostDidBecomeActive {
+            #if DEBUG
+            if hasFullAccess { returnTargetResolver.learn(for: self) }
+            #endif
             hostInactive = false
             if sawHostInactive { hostResumedAt = Date().timeIntervalSince1970 }
             traceTransition("host-active")
@@ -918,7 +935,13 @@ final class KeyboardViewController: UIInputViewController {
                 self.transitionID = nil
             })
     }
-    override func textDidChange(_ textInput: UITextInput?) { super.textDidChange(textInput); if isViewLoaded { refresh() } }
+    override func textDidChange(_ textInput: UITextInput?) {
+        super.textDidChange(textInput)
+        #if DEBUG
+        if hasFullAccess { returnTargetResolver.learn(for: self) }
+        #endif
+        if isViewLoaded { refresh() }
+    }
     deinit {
         NotificationCenter.default.removeObserver(self)
     }

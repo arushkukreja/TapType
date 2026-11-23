@@ -51,11 +51,19 @@ final class HostReturnCacheTests: XCTestCase {
         XCTAssertEqual(cache.count, 1)
     }
 
-    func testEntryExpiresAtEightSeconds() {
+    func testEntryLastsTenMinutes() {
         var cache = HostReturnCache()
         cache.observe(pid: 42, bundle: "com.apple.mobilenotes", now: 100)
-        XCTAssertNil(cache.bundle(for: 42, now: 108))
+        XCTAssertEqual(cache.bundle(for: 42, now: 699), "com.apple.mobilenotes")
+        XCTAssertNil(cache.bundle(for: 42, now: 700))
         XCTAssertEqual(cache.count, 0)
+    }
+
+    func testSurvivesSaving() {
+        var cache = HostReturnCache()
+        cache.observe(pid: 42, bundle: "com.apple.mobilenotes", now: 100)
+        var restored = HostReturnCache(cache.dictionary)
+        XCTAssertEqual(restored.bundle(for: 42, now: 200), "com.apple.mobilenotes")
     }
 
     func testFutureAndStaleEntriesArePruned() {
@@ -63,9 +71,9 @@ final class HostReturnCacheTests: XCTestCase {
         cache.observe(pid: 1, bundle: "com.example.first", now: 100)
         XCTAssertNil(cache.bundle(for: 1, now: 99))
         cache.observe(pid: 1, bundle: "com.example.first", now: 100)
-        cache.observe(pid: 2, bundle: "com.example.second", now: 109)
-        XCTAssertNil(cache.bundle(for: 1, now: 109))
-        XCTAssertEqual(cache.bundle(for: 2, now: 109), "com.example.second")
+        cache.observe(pid: 2, bundle: "com.example.second", now: 701)
+        XCTAssertNil(cache.bundle(for: 1, now: 701))
+        XCTAssertEqual(cache.bundle(for: 2, now: 701), "com.example.second")
         XCTAssertEqual(cache.count, 1)
     }
 }
