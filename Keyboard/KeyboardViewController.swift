@@ -221,12 +221,6 @@ private final class KeyTouchStack: UIStackView {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         guard !isHidden, alpha > 0.01, self.point(inside: point, with: event) else { return nil }
         if let globe = allKeys.first(where: { $0.passesTouches && $0.convert($0.bounds, to: self).contains(point) }) { return globe }
-        // Ordinary controls in a row (the Edit button) handle their own touches.
-        for row in arrangedSubviews.compactMap({ $0 as? UIStackView }) {
-            for view in row.arrangedSubviews where !(view is KeyboardKey) && !view.isHidden {
-                if let hit = view.hitTest(convert(point, to: view), with: event) { return hit }
-            }
-        }
         return self
     }
     /// Count touches slightly above the top row, like the system keyboard.
@@ -742,6 +736,7 @@ final class KeyboardViewController: UIInputViewController {
         setUpEditControls()
         toolbar.addArrangedSubview(left); toolbar.addArrangedSubview(settingsSlot)
         toolbar.addArrangedSubview(status); toolbar.addArrangedSubview(styleButton)
+        toolbar.addArrangedSubview(editSlot)
         toolbar.addArrangedSubview(actionSlot)
         keys.axis = .vertical; keys.spacing = 12; keys.distribution = .fillEqually
         // Both states occupy exactly the same area. Hiding an arranged subview
@@ -992,7 +987,6 @@ final class KeyboardViewController: UIInputViewController {
         let editPurpose = ticket.map { $0.purpose != .dictate } ?? false
         left.isHidden = !active && !reviewing
         settingsSlot.isHidden = active || reviewing
-        updateStyleButton(hidden: active || reviewing || !hasFullAccess || SharedSettings.cleanupMode == "original")
         let waiting = ticket != nil && !matches && alive
         let refused = waiting && state["refusedStart"] as? String == ticket?.id ? state["refusedReason"] as? String : nil
         let timedOut = waiting && Date().timeIntervalSince1970 - (ticket?.created ?? 0) > 5
@@ -1034,6 +1028,10 @@ final class KeyboardViewController: UIInputViewController {
         waveform.isHidden = showLogo
         listeningLabel.isHidden = showLogo
         if showLogo { status.text = state["editing"] as? Bool == true ? "Working on your edit…" : "" }
+        // The style menu steps aside while a message shows, so the message has room
+        // beside the Edit and TapType buttons, even on a 375pt-wide iPhone.
+        let showingMessage = !(status.text ?? "").isEmpty
+        updateStyleButton(hidden: active || reviewing || showingMessage || !hasFullAccess || SharedSettings.cleanupMode == "original")
         if recording {
             if let sequence = state["levelSequence"] as? Int {
                 if sequence != lastLevelSequence {
@@ -1256,11 +1254,14 @@ final class KeyboardViewController: UIInputViewController {
     // MARK: Edit by voice
 
     private func setUpEditControls() {
+        editSlot.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        editSlot.heightAnchor.constraint(equalToConstant: 44).isActive = true
         editButton.translatesAutoresizingMaskIntoConstraints = false
         editButton.setImage(UIImage(systemName: "wand.and.sparkles",
             withConfiguration: UIImage.SymbolConfiguration(pointSize: 19, weight: .regular)), for: .normal)
         editButton.tintColor = .label
-        editButton.layer.cornerRadius = 6
+        editButton.backgroundColor = UIColor.label.withAlphaComponent(0.08)
+        editButton.layer.cornerRadius = 22
         editButton.accessibilityLabel = "Edit by voice"
         editButton.addTarget(self, action: #selector(editTapped), for: .touchUpInside)
         editSlot.addSubview(editButton)
@@ -1694,10 +1695,6 @@ final class KeyboardViewController: UIInputViewController {
         if returnTitle != "return" { enter.backgroundColor = .systemBlue; enter.setTitleColor(.white, for: .normal) }
         bottom.addArrangedSubview(enter)
         enter.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.23).isActive = true
-        // Edit by voice sits in the bottom-right corner, styled like a special key.
-        editButton.backgroundColor = dark ? UIColor(white: 0.24, alpha: 1) : UIColor(white: 0.68, alpha: 1)
-        bottom.addArrangedSubview(editSlot)
-        editSlot.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.12).isActive = true
         keys.addArrangedSubview(bottom)
     }
     private func deleteKey() -> UIButton {
