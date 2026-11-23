@@ -6,7 +6,9 @@ struct ModelSettingsView: View {
     @AppStorage("speechProvider") private var speechProvider = "apple"
     @AppStorage("writingProvider") private var writingProvider = "apple"
     @AppStorage("cleanupMode") private var cleanupMode = CleanupMode.cleanup.rawValue
-    @AppStorage("speakingStyle") private var speakingStyle = SpeakingStyle.natural.rawValue
+    // Shared with the keyboard, which can change it too.
+    @State private var speakingStyle = SharedSettings.speakingStyle
+    @Environment(\.scenePhase) private var scenePhase
     @Binding var cloud: Bool
     @State private var configured = Set(CloudProvider.allCases.filter { (try? ProviderKeys.read($0)) != nil })
     let busy: Bool
@@ -22,12 +24,8 @@ struct ModelSettingsView: View {
                 ForEach(CleanupMode.allCases) { Text($0.title).tag($0.rawValue) }
             }
             if cleanupMode != "original" {
-                VStack(alignment: .leading, spacing: 4) {
-                    Picker("Style", selection: $speakingStyle) {
-                        ForEach(SpeakingStyle.allCases) { Text($0.title).tag($0.rawValue) }
-                    }
-                    Text((SpeakingStyle(rawValue: speakingStyle) ?? .natural).detail)
-                        .font(.caption).foregroundStyle(.secondary)
+                Picker("Style", selection: $speakingStyle) {
+                    ForEach(SpeakingStyle.allCases) { Text($0.title).tag($0.rawValue) }
                 }
                 Picker("Writing", selection: $writingProvider) {
                     ForEach(WritingProvider.allCases.filter { $0.cloud.map { configured.contains($0) } ?? true }) { provider in
@@ -83,6 +81,9 @@ struct ModelSettingsView: View {
         .onAppear(perform: refreshConfigured)
         .task { await apple.refresh(); store.prepareInstalledModels() }
         .onChange(of: cloud) { _, presented in if !presented { refreshConfigured() } }
+        .onChange(of: speakingStyle) { _, value in SharedSettings.set("speakingStyle", value) }
+        .onChange(of: cleanupMode, initial: true) { _, value in SharedSettings.set("cleanupMode", value) }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { speakingStyle = SharedSettings.speakingStyle } }
     }
     private func refreshConfigured() {
         configured = Set(CloudProvider.allCases.filter { (try? ProviderKeys.read($0)) != nil })

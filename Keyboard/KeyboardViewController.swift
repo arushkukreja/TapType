@@ -454,6 +454,8 @@ final class KeyboardViewController: UIInputViewController {
     private let settingsSlot = UIView()
     private let settings = UIButton(type: .system)
     private let actionSlot = UIView()
+    private let styleButton = UIButton(type: .system)
+    private var lastStyleLook = ""
     private var actionWidth: NSLayoutConstraint!
     private let action = UIButton(type: .system)
     private let spinner = UIActivityIndicatorView(style: .medium)
@@ -606,7 +608,11 @@ final class KeyboardViewController: UIInputViewController {
             home.view.bottomAnchor.constraint(equalTo: settingsSlot.bottomAnchor)
         ])
         home.view.backgroundColor = .clear; home.didMove(toParent: self)
-        actionWidth = actionSlot.widthAnchor.constraint(equalToConstant: 124)
+        styleButton.heightAnchor.constraint(equalToConstant: 44).isActive = true
+        styleButton.showsMenuAsPrimaryAction = true
+        styleButton.setContentHuggingPriority(.required, for: .horizontal)
+        styleButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        actionWidth = actionSlot.widthAnchor.constraint(equalToConstant: 44)
         actionWidth.isActive = true
         actionSlot.heightAnchor.constraint(equalToConstant: 44).isActive = true
         action.translatesAutoresizingMaskIntoConstraints = false
@@ -639,7 +645,8 @@ final class KeyboardViewController: UIInputViewController {
         }
         keys.onPress = { [weak self] in self?.keyHaptic?.impactOccurred(intensity: 0.5); self?.keyHaptic?.prepare() }
         toolbar.addArrangedSubview(left); toolbar.addArrangedSubview(settingsSlot)
-        toolbar.addArrangedSubview(status); toolbar.addArrangedSubview(actionSlot)
+        toolbar.addArrangedSubview(status); toolbar.addArrangedSubview(styleButton)
+        toolbar.addArrangedSubview(actionSlot)
         keys.axis = .vertical; keys.spacing = 8; keys.distribution = .fillEqually
         // Both states occupy exactly the same area. Hiding an arranged subview
         // used to make UIStackView reflow while the host was being restored.
@@ -878,6 +885,7 @@ final class KeyboardViewController: UIInputViewController {
         let active = ticket != nil || preparing
         left.isHidden = !active
         settingsSlot.isHidden = active
+        updateStyleButton(hidden: active || !hasFullAccess || SharedSettings.cleanupMode == "original")
         let waiting = ticket != nil && !matches && alive
         let refused = waiting && state["refusedStart"] as? String == ticket?.id ? state["refusedReason"] as? String : nil
         let timedOut = waiting && Date().timeIntervalSince1970 - (ticket?.created ?? 0) > 5
@@ -896,7 +904,6 @@ final class KeyboardViewController: UIInputViewController {
         let finished = matches && state["final"] as? Bool == true
         let needsOpen = hasFullAccess && !preparing && !alive && !(matches && (finished || processing))
         let branded = needsOpen || (!active && error.isEmpty && !busy)
-        actionWidth.constant = branded ? 124 : 44
         listeningLabel.text = preparing ? "Getting ready…" : !error.isEmpty ? error : finished ? "Ready to insert" : !alive ? "Open TapType to reconnect" :
             state["awaitingConfirmation"] as? Bool == true ? "Tap ✓ to finish" : processing ? (state["cleaning"] as? Bool == true ? "Cleaning up…" : "Finishing…") : recording ? "Listening\niPhone Microphone" : "Connecting…"
         if ticket?.document != document && finished { listeningLabel.text = "Text ready\nTap ✓ to insert here" }
@@ -940,11 +947,10 @@ final class KeyboardViewController: UIInputViewController {
             var config = UIButton.Configuration.plain()
             config.baseForegroundColor = .label
             config.image = busy ? nil : UIImage(systemName: !error.isEmpty ? "arrow.clockwise" : active ? "checkmark" : "waveform",
-                withConfiguration: branded ? UIImage.SymbolConfiguration(pointSize: 18, weight: .medium) : toolbarSymbol)
+                withConfiguration: branded ? UIImage.SymbolConfiguration(pointSize: 19, weight: .semibold) : toolbarSymbol)
             config.contentInsets = .zero
             if branded {
-                config.attributedTitle = AttributedString(appName, attributes: AttributeContainer([.font: UIFont.systemFont(ofSize: 15, weight: .semibold)]))
-                config.imagePadding = 6
+                // Just the logo, in a circle.
                 config.background.backgroundColor = UIColor.label.withAlphaComponent(0.08)
                 config.background.cornerRadius = 22
             }
@@ -1021,6 +1027,36 @@ final class KeyboardViewController: UIInputViewController {
 
         let layout = "\(dark)-\(upper)-\(numbers)-\(symbols)-\(needsInputModeSwitchKey)-\(textDocumentProxy.returnKeyType?.rawValue ?? 0)"
         if layout != lastLayout { lastLayout = layout; rebuildKeys() }
+    }
+
+    /// The speaking-style menu beside the TapType button. Rebuilt only when it changes.
+    private func updateStyleButton(hidden: Bool) {
+        let current = SharedSettings.speakingStyle
+        let look = "\(hidden)|\(current)"
+        guard look != lastStyleLook else { return }
+        lastStyleLook = look
+        styleButton.isHidden = hidden
+        guard !hidden else { return }
+        var config = UIButton.Configuration.plain()
+        config.baseForegroundColor = .label
+        config.attributedTitle = AttributedString(SharedSettings.styleTitle(current),
+            attributes: AttributeContainer([.font: UIFont.systemFont(ofSize: 15, weight: .semibold)]))
+        config.image = UIImage(systemName: "chevron.down", withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
+        config.imagePlacement = .trailing
+        config.imagePadding = 5
+        config.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 14, bottom: 0, trailing: 12)
+        config.background.backgroundColor = UIColor.label.withAlphaComponent(0.08)
+        config.background.cornerRadius = 22
+        styleButton.configuration = config
+        styleButton.accessibilityLabel = "Speaking style"
+        styleButton.accessibilityValue = SharedSettings.styleTitle(current)
+        styleButton.menu = UIMenu(options: .singleSelection, children: SharedSettings.styles.map { style in
+            UIAction(title: style.title, state: style.id == current ? .on : .off) { [weak self] _ in
+                SharedSettings.set("speakingStyle", style.id)
+                self?.keyHaptic?.impactOccurred(intensity: 0.5)
+                self?.refresh()
+            }
+        })
     }
 
     private func removeLink() {
