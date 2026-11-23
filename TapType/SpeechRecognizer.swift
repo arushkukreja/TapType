@@ -189,13 +189,7 @@ final class SpeechRecognizer: NSObject, ObservableObject {
             cleanupService = text
             let failure: @Sendable () async -> Void = { [weak self] in await self?.recognitionFailed(epoch: epoch) }
             let service: any StreamingSpeech
-            #if DEBUG
-            // The simulator can't run live speech: a silent stand-in lets edits be tested.
-            let silent = purpose != .dictate && UserDefaults.standard.bool(forKey: "debugVoiceEditFake")
-            #else
-            let silent = false
-            #endif
-            if silent { service = SilentSpeech() }
+            if let silent = Self.debugSilentSpeech(for: purpose) { service = silent }
             else if provider == .apple { service = AppleSpeechService(text: text, failure: failure) }
             else if provider == .openAI, let selection { service = OpenAIStreamingSpeech(selection: selection, text: text, failure: failure) }
             else if provider.downloaded && showsLivePreview { service = HybridSpeechService(provider: provider, text: text, failure: failure) }
@@ -216,6 +210,14 @@ final class SpeechRecognizer: NSObject, ObservableObject {
                 stop()
             }
         } catch { if generation == epoch { failStart(error) } }
+    }
+    /// The simulator can't run live speech: in debug builds a silent stand-in lets edits
+    /// be tested. Release builds never include it.
+    private static func debugSilentSpeech(for purpose: DictationPurpose) -> (any StreamingSpeech)? {
+        #if DEBUG
+        if purpose != .dictate && UserDefaults.standard.bool(forKey: "debugVoiceEditFake") { return SilentSpeech() }
+        #endif
+        return nil
     }
     private func apply(_ snapshot: DictationTextSnapshot, epoch: UUID) {
         guard generation == epoch else { return }
