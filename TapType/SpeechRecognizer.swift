@@ -505,7 +505,10 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     private func startEngine() throws {
         guard !engine.isRunning else { return }
         let audio = AVAudioSession.sharedInstance()
-        try audio.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers, .defaultToSpeaker])
+        // Default mode, not .measurement: measurement turns off iOS's output processing
+        // (including speaker limiting) for every app, so other audio got much louder
+        // while the mic was on, and stayed that way while Keep ready held the session.
+        try audio.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker])
         try audio.setAllowHapticsAndSystemSoundsDuringRecording(true)
         try audio.setActive(true)
         let input = engine.inputNode
