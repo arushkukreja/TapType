@@ -111,6 +111,30 @@ enum KeyboardBridge {
     }
 }
 
+/// Settings the keyboard shows and can change. They live in the app group so the app
+/// and keyboard always agree; the keyboard needs Full Access to write them.
+enum SharedSettings {
+    static let file = "settings.json"
+    /// Speaking styles in menu order: stored value and title.
+    static let styles: [(id: String, title: String)] = [
+        ("natural", "As spoken"), ("formal", "Formal"), ("casual", "Casual"),
+        ("veryCasual", "Very casual"), ("excited", "Excited")
+    ]
+    static func styleTitle(_ id: String) -> String { styles.first { $0.id == id }?.title ?? "As spoken" }
+    static var speakingStyle: String {
+        let value = KeyboardBridge.read(file)["speakingStyle"] as? String ?? ""
+        return styles.contains { $0.id == value } ? value : "natural"
+    }
+    /// The app's "Your words" choice, mirrored so the keyboard can hide styles for Original.
+    static var cleanupMode: String { KeyboardBridge.read(file)["cleanupMode"] as? String ?? "cleanup" }
+    static func set(_ key: String, _ value: String) {
+        var values = KeyboardBridge.read(file)
+        guard values[key] as? String != value else { return }
+        values[key] = value
+        KeyboardBridge.write(values, to: file)
+    }
+}
+
 /// Instant wake-ups between the app and keyboard, so neither side waits for its
 /// next polling tick. Darwin notifications carry no data: the receiver still reads
 /// the shared files, and the existing timers remain as a fallback.

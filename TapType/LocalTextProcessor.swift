@@ -17,26 +17,9 @@ enum CleanupMode: String, CaseIterable, Identifiable, Sendable {
 enum SpeakingStyle: String, CaseIterable, Identifiable, Sendable {
     case natural, formal, casual, veryCasual, excited
     var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .natural: "As spoken"
-        case .formal: "Formal"
-        case .casual: "Casual"
-        case .veryCasual: "Very casual"
-        case .excited: "Excited"
-        }
-    }
-    var detail: String {
-        switch self {
-        case .natural: "Keeps your tone. Normal capitals and punctuation."
-        case .formal: "Full sentences and punctuation. Good for email and work."
-        case .casual: "Relaxed, no period at the end. Good for messages."
-        case .veryCasual: "lowercase and light punctuation, like texting a friend"
-        case .excited: "Upbeat, ends with an exclamation point!"
-        }
-    }
+    var title: String { SharedSettings.styleTitle(rawValue) }
     static var selected: SpeakingStyle {
-        SpeakingStyle(rawValue: UserDefaults.standard.string(forKey: "speakingStyle") ?? "") ?? .natural
+        SpeakingStyle(rawValue: SharedSettings.speakingStyle) ?? .natural
     }
     /// Extra guidance for Rewrite. Clean up keeps the speaker's words, so it gets none.
     var rewriteHint: String {
