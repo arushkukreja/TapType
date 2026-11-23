@@ -1,4 +1,5 @@
 import SwiftUI
+import ActivityKit
 
 @main
 struct TapTypeApp: App {
@@ -37,6 +38,21 @@ struct TapTypeApp: App {
 }
 
 final class TransitionAppDelegate: NSObject, UIApplicationDelegate {
+    /// Swiping TapType away in the app switcher ends its session: the logo leaves the Lock
+    /// Screen and Dynamic Island, and the keyboard stops treating the app as ready. iOS calls
+    /// this while the app is running (as it is when the mic is kept ready).
+    func applicationWillTerminate(_ application: UIApplication) {
+        KeyboardBridge.write([:], to: "state.json")
+        BridgeSignal.post(.state)
+        let ended = DispatchSemaphore(value: 0)
+        Task.detached {
+            for activity in Activity<VoiceActivityAttributes>.activities {
+                await activity.end(nil, dismissalPolicy: .immediate)
+            }
+            ended.signal()
+        }
+        _ = ended.wait(timeout: .now() + 2)
+    }
     func application(_ application: UIApplication, configurationForConnecting session: UISceneSession,
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {
         // Cold-launch URLs are available here before ContentView or onOpenURL.

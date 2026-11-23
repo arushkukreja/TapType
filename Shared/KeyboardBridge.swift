@@ -58,10 +58,26 @@ enum HostReturnIdentity {
     }
 }
 
+/// Which app owns a process ID, learned whenever iOS reports it. iOS can report a stale
+/// current app (the Home Screen) at the moment of a tap while still giving the host's
+/// PID, so the mapping is kept for ten minutes (uptime-based, shared via the app group);
+/// iOS doesn't reuse a PID that quickly.
 struct HostReturnCache {
-    static let lifetime: TimeInterval = 8
+    static let lifetime: TimeInterval = 600
     private var values: [Int: (bundle: String, observed: TimeInterval)] = [:]
     var count: Int { values.count }
+
+    init() {}
+    init(_ stored: [String: Any]) {
+        for (key, value) in stored {
+            guard let pid = Int(key), let entry = value as? [String: Any],
+                  let bundle = entry["bundle"] as? String, let observed = entry["observed"] as? Double else { continue }
+            values[pid] = (bundle, observed)
+        }
+    }
+    var dictionary: [String: Any] {
+        Dictionary(uniqueKeysWithValues: values.map { (String($0.key), ["bundle": $0.value.bundle, "observed": $0.value.observed] as [String: Any]) })
+    }
 
     mutating func observe(pid: Int, bundle: String, now: TimeInterval) {
         guard pid > 0, now.isFinite, !bundle.isEmpty else { return }
