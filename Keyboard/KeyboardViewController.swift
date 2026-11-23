@@ -215,7 +215,7 @@ private final class KeyTouchStack: UIStackView {
     required init(coder: NSCoder) { super.init(coder: coder); isMultipleTouchEnabled = true }
 
     private var allKeys: [KeyboardKey] {
-        arrangedSubviews.flatMap { ($0 as? UIStackView)?.arrangedSubviews ?? [] }.compactMap { $0 as? KeyboardKey }
+        arrangedSubviews.flatMap { $0.subviews }.compactMap { $0 as? KeyboardKey }
     }
     /// The globe key needs real touch events for the system input-mode menu.
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
@@ -304,8 +304,55 @@ private final class KeyTouchStack: UIStackView {
     private func stopRepeating() { repeatTimer?.invalidate(); repeatTimer = nil }
 }
 
+/// One row of keys laid out on the system keyboard's grid. Every letter key is one
+/// tenth of the row (less gaps), so keys line up between rows the way thumbs expect:
+/// - `.centered`: equal keys centred in the row; a 9-key row lands half a key in (A under Q/W).
+/// - `.third`: first and last keys (shift, delete) are wider and flush to the edges;
+///   the keys between fill the centred span of 7 letters, so Z sits under S and M under K.
+private final class KeyRow: UIView {
+    enum Style { case centered, third }
+    static let gap: CGFloat = 6
+    private let style: Style
+    private let keys: [UIView]
+
+    init(_ keys: [UIView], style: Style) {
+        self.keys = keys; self.style = style
+        super.init(frame: .zero)
+        keys.forEach(addSubview)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let gap = Self.gap, height = bounds.height
+        let keyWidth = (bounds.width - 9 * gap) / 10
+        let pitch = keyWidth + gap
+        func place(_ view: UIView, x: CGFloat, width: CGFloat) {
+            view.frame = CGRect(x: x, y: 0, width: width, height: height).integral
+        }
+        switch style {
+        case .centered:
+            let count = CGFloat(keys.count)
+            let start = (bounds.width - count * keyWidth - (count - 1) * gap) / 2
+            for (index, key) in keys.enumerated() { place(key, x: start + CGFloat(index) * pitch, width: keyWidth) }
+        case .third:
+            guard keys.count >= 3, let first = keys.first, let last = keys.last else { return }
+            let sideWidth = (keyWidth * 1.35).rounded()
+            place(first, x: 0, width: sideWidth)
+            place(last, x: bounds.width - sideWidth, width: sideWidth)
+            let middle = keys.dropFirst().dropLast()
+            let count = CGFloat(middle.count)
+            let span = 7 * keyWidth + 6 * gap
+            let width = (span - (count - 1) * gap) / count
+            for (index, key) in middle.enumerated() { place(key, x: 1.5 * pitch + CGFloat(index) * (width + gap), width: width) }
+        }
+    }
+}
+
 private enum KeyboardMetrics {
-    static let height: CGFloat = 260
+    // 44pt toolbar + 12pt gap + four 42pt key rows with 12pt between them,
+    // plus the 12pt the content is inset from the keyboard's edges.
+    static let height: CGFloat = 272
     /// Taller while reviewing an edit, so a paragraph of changes fits.
     static let reviewHeight: CGFloat = 350
 }
@@ -612,7 +659,7 @@ final class KeyboardViewController: UIInputViewController {
         view.isOpaque = false
         // Match the system backdrop's top inset with breathing room below the
         // toolbar, so the TapType controls sit midway between top and keys.
-        root.axis = .vertical; root.spacing = 20
+        root.axis = .vertical; root.spacing = 12
         root.autoresizingMask = [.flexibleWidth, .flexibleTopMargin]
         view.addSubview(root)
         heightConstraint = view.heightAnchor.constraint(equalToConstant: KeyboardMetrics.height)
@@ -696,7 +743,7 @@ final class KeyboardViewController: UIInputViewController {
         toolbar.addArrangedSubview(left); toolbar.addArrangedSubview(settingsSlot)
         toolbar.addArrangedSubview(status); toolbar.addArrangedSubview(styleButton)
         toolbar.addArrangedSubview(actionSlot)
-        keys.axis = .vertical; keys.spacing = 8; keys.distribution = .fillEqually
+        keys.axis = .vertical; keys.spacing = 12; keys.distribution = .fillEqually
         // Both states occupy exactly the same area. Hiding an arranged subview
         // used to make UIStackView reflow while the host was being restored.
         root.addArrangedSubview(toolbar)
@@ -1609,21 +1656,15 @@ final class KeyboardViewController: UIInputViewController {
         keys.cancelAll()
         keys.arrangedSubviews.forEach { keys.removeArrangedSubview($0); $0.removeFromSuperview() }
         if !numbers {
-            addRow(Array("qwertyuiop").map(String.init), inset: 0)
-            addRow(Array("asdfghjkl").map(String.init), inset: 17)
-            let row = rowStack()
-            row.addArrangedSubview(key("", symbol: upper ? "shift.fill" : "shift", special: true) { [weak self] in self?.upper.toggle(); self?.refresh() })
-            for c in Array("zxcvbnm") { row.addArrangedSubview(letter(String(c))) }
-            row.addArrangedSubview(deleteKey())
-            keys.addArrangedSubview(row)
+            addRow(Array("qwertyuiop").map(String.init))
+            addRow(Array("asdfghjkl").map(String.init))
+            let shift = key("", symbol: upper ? "shift.fill" : "shift", special: true) { [weak self] in self?.upper.toggle(); self?.refresh() }
+            keys.addArrangedSubview(KeyRow([shift] + Array("zxcvbnm").map { letter(String($0)) } + [deleteKey()], style: .third))
         } else {
-            addRow(symbols ? ["[","]","{","}","#","%","^","*","+","="] : Array("1234567890").map(String.init), inset: 0)
-            addRow(symbols ? ["_","\\","|","~","<",">","€","£","¥","•"] : ["-","/",":",";","(",")","$","&","@","\""], inset: 0)
-            let row = rowStack()
-            row.addArrangedSubview(key(symbols ? "123" : "#+=", special: true) { [weak self] in self?.symbols.toggle(); self?.refresh() })
-            for c in [".",",","?","!","'"] { row.addArrangedSubview(letter(c)) }
-            row.addArrangedSubview(deleteKey())
-            keys.addArrangedSubview(row)
+            addRow(symbols ? ["[","]","{","}","#","%","^","*","+","="] : Array("1234567890").map(String.init))
+            addRow(symbols ? ["_","\\","|","~","<",">","€","£","¥","•"] : ["-","/",":",";","(",")","$","&","@","\""])
+            let toggle = key(symbols ? "123" : "#+=", special: true) { [weak self] in self?.symbols.toggle(); self?.refresh() }
+            keys.addArrangedSubview(KeyRow([toggle] + [".",",","?","!","'"].map { letter($0) } + [deleteKey()], style: .third))
         }
         let bottom = rowStack(); bottom.distribution = .fill
         let mode = key(numbers ? "ABC" : "123", special: true) { [weak self] in self?.numbers.toggle(); self?.refresh() }
@@ -1666,14 +1707,10 @@ final class KeyboardViewController: UIInputViewController {
         return delete
     }
     private func rowStack() -> UIStackView {
-        let row = UIStackView(); row.axis = .horizontal; row.spacing = 6; row.distribution = .fillEqually; return row
+        let row = UIStackView(); row.axis = .horizontal; row.spacing = KeyRow.gap; row.distribution = .fillEqually; return row
     }
-    private func addRow(_ letters: [String], inset: CGFloat) {
-        let row = rowStack()
-        letters.forEach { row.addArrangedSubview(letter($0)) }
-        row.isLayoutMarginsRelativeArrangement = true
-        row.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 0, leading: inset, bottom: 0, trailing: inset)
-        keys.addArrangedSubview(row)
+    private func addRow(_ letters: [String]) {
+        keys.addArrangedSubview(KeyRow(letters.map { letter($0) }, style: .centered))
     }
     private func letter(_ value: String) -> UIButton {
         let text = upper ? value.uppercased() : value
