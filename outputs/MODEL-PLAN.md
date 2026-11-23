@@ -39,8 +39,8 @@ only while readiness is enabled. Manual end, expiry, errors and interruptions re
 snapshots the providers and begins a new clip. ✓ detaches it, resamples to mono 16 kHz,
 and runs the selected speech and writing stages. × discards/cancels it. Requests keep
 the existing ticket, original-field and insert-once protections. Raw audio is not saved
-to disk. At the 55-second limit, downloaded/cloud clips await ✓ for up to 20 seconds;
-the time limit itself cannot upload them.
+to disk. (Updated November 21, 2026: the original 55-second limit is now 30 minutes.
+At 30 minutes recording stops and asks you to finish with ✓ to use the text.)
 
 Still separate work: downloaded writing LLMs, multilingual selection, custom API
 URLs, saved-audio retry, dictionaries/snippets, Action Button/App Intents, and native-grade
@@ -50,8 +50,9 @@ keyboard autocorrection/swipe typing. These are not presented as working options
 
 Flow documents broader language, dictionary, snippets/history and shortcut features.
 TapType currently offers explicit local/cloud model control and timestamped original-text
-history, but has a shorter 55-second recording limit and no persistent audio history. Flow's documented iOS
-limit is five minutes. Its auto-stop countdown also depends on background/keyboard
+history and a 30-minute recording limit, but no persistent audio history. Flow's documented iOS
+limit is five minutes. See [COMPETITOR-COMPARISON.md](COMPETITOR-COMPARISON.md) for the
+current comparison, including Granola. Its auto-stop countdown also depends on background/keyboard
 activity, while TapType uses a strict five minutes from the end of each dictation.
 
 Flow distinguishes its Live Activity pill from iOS's microphone indicator; its pill
