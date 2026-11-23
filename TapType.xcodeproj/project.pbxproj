@@ -83,6 +83,8 @@ AA3000000000000000000006 = {isa = PBXBuildFile; productRef = AA30000000000000000
         BE2000000000000000000002 = {isa = PBXBuildFile; fileRef = BE1000000000000000000001; };
         BE1000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TapType/VoiceEditor.swift; sourceTree = SOURCE_ROOT; };
         BE2000000000000000000003 = {isa = PBXBuildFile; fileRef = BE1000000000000000000002; };
+        BE1000000000000000000003 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TapType/LocalVoiceEdit.swift; sourceTree = SOURCE_ROOT; };
+        BE2000000000000000000004 = {isa = PBXBuildFile; fileRef = BE1000000000000000000003; };
         B10000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keyboard/KeyboardViewController.swift; sourceTree = SOURCE_ROOT; };
         B10000000000000000000003 = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; path = TapTypeKeyboard.appex; sourceTree = BUILT_PRODUCTS_DIR; };
         B20000000000000000000001 = {isa = PBXBuildFile; fileRef = B10000000000000000000001; };
@@ -169,6 +171,7 @@ AA3000000000000000000006,
                 B10000000000000000000001,
                 BE1000000000000000000001,
                 BE1000000000000000000002,
+                BE1000000000000000000003,
                 B10000000000000000000002,
                 B10000000000000000000003,
 				A40000000000000000000002 /* TapType */,
@@ -297,6 +300,7 @@ AA2000000000000000000005,
                 B20000000000000000000001,
                 BE2000000000000000000001,
                 BE2000000000000000000003,
+                BE2000000000000000000004,
                 D20000000000000000000001,
 				A10000000000000000000001 /* TapTypeApp.swift in Sources */,
 				A10000000000000000000002 /* ContentView.swift in Sources */,
