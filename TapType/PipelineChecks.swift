@@ -21,6 +21,13 @@ enum PipelineChecks {
         func check(_ yes: Bool, _ name: String) { print("PIPELINE_CHECK: \(name)=\(yes)"); assert(yes, name); n += 1 }
         check(!LocalTextProcessor.plausible("This recording is a prototype of the Quantum Echo, featuring enhanced sound modulation and a sleek, ergonomic design.", original: "This recording is"), "cleanup_rejects_invented_ending")
         check(LocalTextProcessor.plausible("Can you send 3 copies to Maya?", original: "um can you uh send 3 copies to Maya"), "cleanup_keeps_filler_removal")
+        let styled = "Sounds good. I'm gonna call Maya at 3. NASA is next."
+        check(SpeakingStyle.natural.apply(styled) == styled, "style_natural_unchanged")
+        check(SpeakingStyle.formal.apply("i'm gonna call Maya") == "I'm going to call Maya.", "style_formal_punctuates")
+        check(SpeakingStyle.casual.apply(styled) == "Sounds good. I'm gonna call Maya at 3. NASA is next", "style_casual_drops_final_period")
+        check(SpeakingStyle.veryCasual.apply(styled) == "sounds good. I'm gonna call Maya at 3. NASA is next", "style_very_casual_lowercases_starts")
+        check(SpeakingStyle.veryCasual.apply("Are you free? 3 Apples left...") == "are you free? 3 Apples left...", "style_very_casual_keeps_questions_and_numbers")
+        check(SpeakingStyle.excited.apply("We won.") == "We won!" && SpeakingStyle.excited.apply("Are you in?") == "Are you in?", "style_excited_exclaims")
         var preview = StreamingTextState()
         preview.preview(start: 0, end: 3, words: [.init(start: 0, end: 1, text: "Send"), .init(start: 1, end: 2, text: " three"), .init(start: 2, end: 3, text: " copies")])
         check(preview.snapshot.display == "Send three copies" && preview.next == nil, "preview_visible_never_queued")

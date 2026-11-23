@@ -235,8 +235,10 @@ final class SpeechRecognizer: NSObject, ObservableObject {
             watchdog?.cancel(); DictationLatency.mark("transcribed", id: transcriptID)
             let result = await text.finish()
             guard !Task.isCancelled, generation == epoch else { return }
-            transcript = result.refined; originalTranscript = result.finalized
-            provisionalTranscript = ""; finalizedTranscript = result.finalized; refinedTranscript = result.refined
+            // The speaking style formats only finished text; Original stays untouched.
+            let styled = CleanupMode.selected == .original ? result.refined : SpeakingStyle.selected.apply(result.refined)
+            transcript = styled; originalTranscript = result.finalized
+            provisionalTranscript = ""; finalizedTranscript = result.finalized; refinedTranscript = styled
             cleanupNotice = result.notice ?? cleanupNotice
             if transcript.isEmpty { errorMessage = "We didn’t hear any confirmed words. Please try again." }
             else {
