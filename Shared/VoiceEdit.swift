@@ -118,7 +118,9 @@ enum VoiceEditPlanner {
         let originals = matches.map(\.change.original).joined(separator: " ")
         let replacements = matches.map(\.change.replacement).joined(separator: " ")
         let allowed = Set(numbers(in: originals + " " + instruction + " " + text))
-        if numbers(in: replacements).contains(where: { !allowed.contains($0) }) { return .failure(.addsNumbers) }
+        // A numbered list's own "1." "2." markers aren't new facts.
+        let written = replacements.replacingOccurrences(of: #"(?m)^\s*\d+[.)]\s"#, with: "", options: .regularExpression)
+        if numbers(in: written).contains(where: { !allowed.contains($0) }) { return .failure(.addsNumbers) }
         if replacements.count > max(400, originals.count * 3) { return .failure(.tooLong) }
         return .success(matches)
     }
@@ -353,6 +355,65 @@ struct VoiceEditRequest {
         if let selection = context.selectionRange { return selection }
         guard !lastDictation.isEmpty, case .success(let range) = VoiceEditPlanner.locate(lastDictation, in: context.full) else { return nil }
         return range
+    }
+    /// The text of that part, or the whole text when there's no selection or last dictation.
+    var defaultPart: String {
+        let full = context.full
+        guard let range = preferredRange else { return full }
+        let start = full.index(full.startIndex, offsetBy: range.lowerBound)
+        return String(full[start..<full.index(start, offsetBy: range.count)])
+    }
+}
+
+/// Lists are built by TapType from the items the model picks out, so a "bulleted list"
+/// is always one item per line instead of a single bullet in front of a paragraph.
+enum VoiceEditList {
+    enum Style: Equatable { case bullets, numbered }
+
+    /// Whether the instruction asks to turn text into a list, and which kind.
+    static func style(for instruction: String) -> Style? {
+        let words = Set(instruction.lowercased().components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty })
+        if words.contains("numbered") || (words.contains("number") && words.contains("list")) || words.contains("steps") { return .numbered }
+        if !words.isDisjoint(with: ["bullet", "bullets", "bulleted", "bulletpoints", "list", "checklist", "points"]) { return .bullets }
+        return nil
+    }
+
+    /// The list as plain text, keeping the passage's surrounding spaces and line breaks.
+    static func format(title: String, items: [String], style: Style, around original: String) -> String {
+        let clean = items.map { item in
+            var text = item.trimmingCharacters(in: .whitespacesAndNewlines)
+            // The model sometimes writes its own marker; TapType adds one.
+            while let first = text.first, "•-*–·".contains(first) || first.isNumber {
+                text.removeFirst()
+                if text.first == "." || text.first == ")" { text.removeFirst() }
+                text = text.trimmingCharacters(in: .whitespaces)
+            }
+            if text.hasSuffix("."), !text.dropLast().contains(".") { text.removeLast() }
+            return text
+        }.filter { !$0.isEmpty }
+        let lines = clean.enumerated().map { style == .numbered ? "\($0.offset + 1). \($0.element)" : "• \($0.element)" }
+        var heading = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if heading.hasSuffix(".") { heading.removeLast() }
+        // Only a heading that's really in the text: the model sometimes invents one.
+        if !original.localizedCaseInsensitiveContains(heading) { heading = "" }
+        let body = (heading.isEmpty ? [] : [heading]) + lines
+        let leading = original.prefix { $0.isWhitespace }, trailing = String(original.reversed().prefix { $0.isWhitespace }.reversed())
+        return leading + body.joined(separator: "\n") + trailing
+    }
+}
+
+extension VoiceEditList {
+    /// A list placed mid-line starts on its own line, and text after it moves to the next one.
+    static func onOwnLines(_ list: String, replacing passage: String, in text: String) -> String {
+        guard let range = text.range(of: passage) else { return list }
+        var result = list
+        if range.lowerBound > text.startIndex, let before = text[..<range.lowerBound].last, !before.isNewline, !list.hasPrefix("\n") {
+            result = "\n" + result.drop { $0 == " " }
+        }
+        if range.upperBound < text.endIndex, let after = text[range.upperBound...].first, !after.isNewline, !list.hasSuffix("\n") {
+            result = String(result.reversed().drop { $0 == " " }.reversed()) + "\n"
+        }
+        return result
     }
 }
 

@@ -124,3 +124,43 @@ final class VoiceReviewCommandTests: XCTestCase {
         XCTAssertEqual(DictationPurpose(nil), .dictate)
     }
 }
+
+final class VoiceEditListTests: XCTestCase {
+    func testListRequestsAreRecognized() {
+        XCTAssertEqual(VoiceEditList.style(for: "make this a bulleted list"), .bullets)
+        XCTAssertEqual(VoiceEditList.style(for: "Bullet points please"), .bullets)
+        XCTAssertEqual(VoiceEditList.style(for: "make it a numbered list"), .numbered)
+        XCTAssertEqual(VoiceEditList.style(for: "turn it into steps"), .numbered)
+        XCTAssertNil(VoiceEditList.style(for: "make it more formal"))
+        XCTAssertNil(VoiceEditList.style(for: "change Friday to Monday"))
+    }
+
+    func testFormatPutsOneItemPerLine() {
+        XCTAssertEqual(VoiceEditList.format(title: "Groceries", items: ["milk", "• eggs.", "2. bread"], style: .bullets, around: "Groceries milk eggs bread"),
+                       "Groceries\n• milk\n• eggs\n• bread")
+        XCTAssertEqual(VoiceEditList.format(title: "", items: ["Preheat the oven", "Bake"], style: .numbered, around: "x\n"),
+                       "1. Preheat the oven\n2. Bake\n")
+        // A heading the model made up is dropped.
+        XCTAssertEqual(VoiceEditList.format(title: "Recipe", items: ["Bake"], style: .bullets, around: "Bake it"), "• Bake")
+    }
+
+    func testListMidLineStartsOnItsOwnLine() {
+        let text = "Hi team. Thanks for coming. Bye."
+        XCTAssertEqual(VoiceEditList.onOwnLines("• Thanks for coming", replacing: "Thanks for coming.", in: text), "\n• Thanks for coming\n")
+        XCTAssertEqual(VoiceEditList.onOwnLines("• a\n• b", replacing: text, in: text), "• a\n• b")
+    }
+
+    func testNumberedListMarkersAreNotNewNumbers() throws {
+        let text = "Preheat the oven to 350. Bake for 25 minutes."
+        let change = VoiceEditChange(original: text, replacement: "1. Preheat the oven to 350\n2. Bake for 25 minutes")
+        XCTAssertNoThrow(try VoiceEditPlanner.plan([change], in: text, instruction: "make it a numbered list").get())
+        let invented = VoiceEditChange(original: text, replacement: "1. Preheat the oven to 400\n2. Bake for 25 minutes")
+        XCTAssertEqual(VoiceEditPlanner.plan([invented], in: text, instruction: "make it a numbered list"), .failure(.addsNumbers))
+    }
+
+    func testDefaultPartIsSelectionThenLastDictationThenAll() {
+        XCTAssertEqual(VoiceEditRequest(id: "1", document: "d", context: VoiceEditContext(before: "Hi. ", selected: "Pick me.", after: " Bye.")).defaultPart, "Pick me.")
+        XCTAssertEqual(VoiceEditRequest(id: "1", document: "d", context: VoiceEditContext(before: "Hi. Last one."), lastDictation: "Last one.").defaultPart, "Last one.")
+        XCTAssertEqual(VoiceEditRequest(id: "1", document: "d", context: VoiceEditContext(before: "All of it.")).defaultPart, "All of it.")
+    }
+}

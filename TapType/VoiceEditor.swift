@@ -1,22 +1,6 @@
 import Foundation
 import FoundationModels
 
-@available(iOS 26.0, *)
-@Generable
-private struct SuggestedEdits {
-    @Guide(description: "The changes to make, in the order they appear in the document. Empty if nothing should change.")
-    var changes: [SuggestedChange]
-}
-
-@available(iOS 26.0, *)
-@Generable
-private struct SuggestedChange {
-    @Guide(description: "A passage copied exactly, character for character, from the document. Long enough to appear only once: a whole sentence, line or paragraph.")
-    var original: String
-    @Guide(description: "The new text that replaces the passage. Empty to delete it.")
-    var replacement: String
-}
-
 /// Turns a spoken instruction into suggested changes for the keyboard to show. It never
 /// edits anything itself; the keyboard applies changes only after you approve them.
 @MainActor
@@ -127,11 +111,10 @@ enum VoiceEditor {
         guard #available(iOS 26.0, *), LocalTextProcessor.availability.ready else {
             throw ProviderFailure(message: "Edit by voice needs Apple Intelligence, or a cloud writing model in TapType.")
         }
-        let session = LanguageModelSession(instructions: rules)
         do {
-            let response = try await session.respond(to: prompt(instruction, request: request), generating: SuggestedEdits.self,
-                options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 2000))
-            return response.content.changes.map { VoiceEditChange(original: $0.original, replacement: $0.replacement) }
+            // Two small steps (find the part, then rewrite it), which the on-device model
+            // does far better than quoting and rewriting in one answer.
+            return try await LocalVoiceEdit.changes(instruction, request: request, previous: request.previous)
         } catch let error as LanguageModelSession.GenerationError {
             #if DEBUG
             print("VOICE_EDIT_MODEL_ERROR: \(error)")
