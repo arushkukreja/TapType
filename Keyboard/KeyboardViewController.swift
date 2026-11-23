@@ -221,6 +221,12 @@ private final class KeyTouchStack: UIStackView {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         guard !isHidden, alpha > 0.01, self.point(inside: point, with: event) else { return nil }
         if let globe = allKeys.first(where: { $0.passesTouches && $0.convert($0.bounds, to: self).contains(point) }) { return globe }
+        // Ordinary controls in a row (the Edit button) handle their own touches.
+        for row in arrangedSubviews.compactMap({ $0 as? UIStackView }) {
+            for view in row.arrangedSubviews where !(view is KeyboardKey) && !view.isHidden {
+                if let hit = view.hitTest(convert(point, to: view), with: event) { return hit }
+            }
+        }
         return self
     }
     /// Count touches slightly above the top row, like the system keyboard.
@@ -300,20 +306,22 @@ private final class KeyTouchStack: UIStackView {
 
 private enum KeyboardMetrics {
     static let height: CGFloat = 260
-    static let contentHeight: CGFloat = 248
+    /// Taller while reviewing an edit, so a paragraph of changes fits.
+    static let reviewHeight: CGFloat = 350
 }
 
 private final class FixedHeightKeyboardView: UIInputView {
+    var height = KeyboardMetrics.height { didSet { if height != oldValue { invalidateIntrinsicContentSize() } } }
     override var intrinsicContentSize: CGSize {
-        CGSize(width: UIView.noIntrinsicMetric, height: KeyboardMetrics.height)
+        CGSize(width: UIView.noIntrinsicMetric, height: height)
     }
     override func systemLayoutSizeFitting(_ targetSize: CGSize) -> CGSize {
-        CGSize(width: targetSize.width, height: KeyboardMetrics.height)
+        CGSize(width: targetSize.width, height: height)
     }
     override func systemLayoutSizeFitting(_ targetSize: CGSize,
         withHorizontalFittingPriority horizontalFittingPriority: UILayoutPriority,
         verticalFittingPriority: UILayoutPriority) -> CGSize {
-        CGSize(width: targetSize.width, height: KeyboardMetrics.height)
+        CGSize(width: targetSize.width, height: height)
     }
 }
 
@@ -344,7 +352,7 @@ private struct OpenVoiceApp: View {
     @Environment(\.openURL) private var openURL
     @State private var opening = false
     let url: URL
-    let name: String
+    let label: String
     let prepare: () -> Bool
     let captureReturnTarget: @MainActor () async -> Void
     let canOpen: () -> Bool
@@ -371,7 +379,7 @@ private struct OpenVoiceApp: View {
             Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contentShape(Rectangle())
         }
-        .accessibilityLabel("\(name), start dictation")
+        .accessibilityLabel(label)
         .buttonStyle(.plain)
     }
 }
@@ -475,8 +483,46 @@ final class KeyboardViewController: UIInputViewController {
     private let waveform = VoiceWaveform()
     private let processingLogo = UIImageView(image: UIImage(systemName: "waveform"))
     private let listeningLabel = UILabel()
-    private var linkHost: UIHostingController<OpenVoiceApp>?
-    private var linkDocument = ""
+    /// A button that has to open TapType first (when it isn't running) for its purpose.
+    private final class VoiceLink {
+        let purpose: DictationPurpose
+        var host: UIHostingController<OpenVoiceApp>?
+        var document = ""
+        init(_ purpose: DictationPurpose) { self.purpose = purpose }
+    }
+    private let actionLink = VoiceLink(.dictate)
+    private let editLink = VoiceLink(.edit)
+    private let replyLink = VoiceLink(.review)
+    private var keyboardView: FixedHeightKeyboardView?
+    private var heightConstraint: NSLayoutConstraint!
+    private var keyboardHeight = KeyboardMetrics.height
+    // Edit by voice
+    private let editSlot = UIView()
+    private let editButton = UIButton(type: .system)
+    private let reviewPanel = UIView()
+    private let reviewHeader = UILabel()
+    private let reviewText = UITextView()
+    private let reviewPrevious = UIButton(type: .system)
+    private let reviewNext = UIButton(type: .system)
+    private let reviewInclude = UIButton(type: .system)
+    private let reviewCompare = UIButton(type: .system)
+    private let replySlot = UIView()
+    private let replyButton = UIButton(type: .system)
+    /// A suggestion waiting for approval. Nothing in the text field changes until you apply it.
+    private struct Review {
+        var document: String
+        var instruction: String
+        var context: VoiceEditContext
+        var matches: [VoiceEditMatch]
+        var included: [Bool]
+        var index = 0
+        var showBefore = false
+        var isUndo = false
+    }
+    private var review: Review?
+    private var editRequest: VoiceEditRequest?
+    private var applying = false
+    private var editEnabled: Bool { state["voiceEditEnabled"] as? Bool ?? VoiceEditPreference.enabled }
     private var timer: Timer?
     private var stateSignal: BridgeSignal?
     private var lastRefresh: CFTimeInterval = 0
@@ -524,6 +570,7 @@ final class KeyboardViewController: UIInputViewController {
     override func loadView() {
         let keyboard = FixedHeightKeyboardView(frame: CGRect(x: 0, y: 0, width: 0, height: KeyboardMetrics.height), inputViewStyle: .keyboard)
         keyboard.allowsSelfSizing = true
+        keyboardView = keyboard
         inputView = keyboard
     }
 
@@ -542,7 +589,7 @@ final class KeyboardViewController: UIInputViewController {
     private func layoutKeyboardContents() {
         // UIKit can replace the remote view's bounds after its height constraint
         // was solved. Position using the final bounds, not the earlier proposal.
-        let contentHeight = min(KeyboardMetrics.contentHeight, max(0, view.bounds.height - 12))
+        let contentHeight = min(keyboardHeight - 12, max(0, view.bounds.height - 12))
         let frame = CGRect(x: 6, y: max(5, view.bounds.height - contentHeight - 7),
                            width: max(0, view.bounds.width - 12), height: contentHeight)
         root.frame = frame
@@ -568,7 +615,8 @@ final class KeyboardViewController: UIInputViewController {
         root.axis = .vertical; root.spacing = 20
         root.autoresizingMask = [.flexibleWidth, .flexibleTopMargin]
         view.addSubview(root)
-        view.heightAnchor.constraint(equalToConstant: KeyboardMetrics.height).isActive = true
+        heightConstraint = view.heightAnchor.constraint(equalToConstant: KeyboardMetrics.height)
+        heightConstraint.isActive = true
         toolbar.axis = .horizontal; toolbar.alignment = .center; toolbar.spacing = 10
         toolbar.heightAnchor.constraint(equalToConstant: 44).isActive = true
         left.widthAnchor.constraint(equalToConstant: 44).isActive = true
@@ -644,6 +692,7 @@ final class KeyboardViewController: UIInputViewController {
             keyHaptic = UIImpactFeedbackGenerator(style: .light)
         }
         keys.onPress = { [weak self] in self?.keyHaptic?.impactOccurred(intensity: 0.5); self?.keyHaptic?.prepare() }
+        setUpEditControls()
         toolbar.addArrangedSubview(left); toolbar.addArrangedSubview(settingsSlot)
         toolbar.addArrangedSubview(status); toolbar.addArrangedSubview(styleButton)
         toolbar.addArrangedSubview(actionSlot)
@@ -652,7 +701,7 @@ final class KeyboardViewController: UIInputViewController {
         // used to make UIStackView reflow while the host was being restored.
         root.addArrangedSubview(toolbar)
         root.addArrangedSubview(bodyPanel)
-        for panel in [keys, listening] {
+        for panel in [keys, listening, reviewPanel] {
             panel.translatesAutoresizingMaskIntoConstraints = false
             bodyPanel.addSubview(panel)
             NSLayoutConstraint.activate([
@@ -867,6 +916,8 @@ final class KeyboardViewController: UIInputViewController {
             // Persist before insertion: a keyboard reload cannot replay a completed dictation.
             KeyboardBridge.write(["id": ticket.id], to: "inserted.json")
             textDocumentProxy.insertText(text)
+            // Remember it: an edit that doesn't name a part changes the last dictation.
+            KeyboardBridge.write(["document": document, "text": text], to: "voice-edit-last.json")
             keyHaptic?.impactOccurred(intensity: 0.7)
             DictationLatency.mark("inserted", id: ticket.id)
             KeyboardBridge.command("clear", requestID: ticket.id)
@@ -876,6 +927,12 @@ final class KeyboardViewController: UIInputViewController {
             localMessage = nil
         }
 
+        // An edit instruction finished: show its suggestion, or act on a spoken review command.
+        if visible, let ticket, ticket.purpose != .dictate, matches, state["final"] as? Bool == true,
+           let outcome = VoiceEditOutcome(state["voiceEdit"] as? [String: Any]), outcome.id == ticket.id {
+            finishInstruction(ticket, outcome: outcome, document: document)
+        }
+
         var preparation = KeyboardBridge.read("preparing.json")
         if let id = preparation["id"] as? String, state["transcriptID"] as? String == id {
             KeyboardBridge.write([:], to: "preparing.json")
@@ -883,24 +940,29 @@ final class KeyboardViewController: UIInputViewController {
         }
         let preparing = KeyboardHandoff.isPending(preparation, document: document, state: state)
         let active = ticket != nil || preparing
-        left.isHidden = !active
-        settingsSlot.isHidden = active
-        updateStyleButton(hidden: active || !hasFullAccess || SharedSettings.cleanupMode == "original")
+        if let review, review.document != document { self.review = nil }
+        let reviewing = review != nil && !active
+        let editPurpose = ticket.map { $0.purpose != .dictate } ?? false
+        left.isHidden = !active && !reviewing
+        settingsSlot.isHidden = active || reviewing
+        updateStyleButton(hidden: active || reviewing || !hasFullAccess || SharedSettings.cleanupMode == "original")
         let waiting = ticket != nil && !matches && alive
         let refused = waiting && state["refusedStart"] as? String == ticket?.id ? state["refusedReason"] as? String : nil
         let timedOut = waiting && Date().timeIntervalSince1970 - (ticket?.created ?? 0) > 5
         let error = matches ? state["error"] as? String ?? "" : refused ?? (timedOut ? "Couldn’t start dictation. Tap retry." : "")
         let busy = processing || preparing || (waiting && !timedOut && refused == nil)
         if active { hideKeyPreview() }
-        keys.isHidden = active
+        keys.isHidden = active || reviewing
         listening.isHidden = !active
+        reviewPanel.isHidden = !reviewing
         let toolbarSymbol = UIImage.SymbolConfiguration(pointSize: 20, weight: .regular)
-        left.setImage(UIImage(systemName: active ? "xmark" : "keyboard.chevron.compact.down",
+        left.setImage(UIImage(systemName: active || reviewing ? "xmark" : "keyboard.chevron.compact.down",
                               withConfiguration: toolbarSymbol), for: .normal)
         left.tintColor = .label
-        left.accessibilityLabel = active ? "Cancel dictation" : "Hide keyboard"
+        left.accessibilityLabel = reviewing ? "Cancel edit" : active ? (editPurpose ? "Cancel edit" : "Cancel dictation") : "Hide keyboard"
         status.textColor = .secondaryLabel
-        status.text = !hasFullAccess ? "Allow Full Access in keyboard settings" : localMessage ?? (state["notice"] as? String ?? "")
+        status.text = !hasFullAccess ? "Allow Full Access in keyboard settings" : localMessage ?? (editPurpose ? "" : state["notice"] as? String ?? "")
+        if reviewing, let review { status.text = applying ? "Applying…" : review.isUndo ? "Undo last edit" : "“\(review.instruction)”" }
         let finished = matches && state["final"] as? Bool == true
         let needsOpen = hasFullAccess && !preparing && !alive && !(matches && (finished || processing))
         let branded = needsOpen || (!active && error.isEmpty && !busy)
@@ -910,6 +972,9 @@ final class KeyboardViewController: UIInputViewController {
         // Show the words as they're recognized; the newest stay visible.
         let live = recording && error.isEmpty ? (state["live"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines) : ""
         if !live.isEmpty { listeningLabel.text = live }
+        if editPurpose && recording && live.isEmpty && error.isEmpty {
+            listeningLabel.text = ticket?.purpose == .review ? "Say “apply”, “cancel”,\nor what to change" : "Say your edit\n“make this a bulleted list”"
+        }
         listeningLabel.font = .systemFont(ofSize: !error.isEmpty ? 14 : live.isEmpty ? 20 : 17)
         listeningLabel.lineBreakMode = live.isEmpty ? .byTruncatingTail : .byTruncatingHead
         listeningLabel.numberOfLines = 3
@@ -921,7 +986,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         waveform.isHidden = showLogo
         listeningLabel.isHidden = showLogo
-        if showLogo { status.text = "" }
+        if showLogo { status.text = state["editing"] as? Bool == true ? "Working on your edit…" : "" }
         if recording {
             if let sequence = state["levelSequence"] as? Int {
                 if sequence != lastLevelSequence {
@@ -941,11 +1006,21 @@ final class KeyboardViewController: UIInputViewController {
         action.tintColor = .label
         spinner.color = action.tintColor
         // Rebuilding the configuration re-lays out the button, so only do it when its look changes.
-        let actionStyle = "\(busy)|\(error.isEmpty)|\(active)|\(branded)|\(appName)"
+        let actionStyle = "\(busy)|\(error.isEmpty)|\(active)|\(branded)|\(appName)|\(reviewing)"
+        actionWidth.constant = reviewing ? 98 : 44
         if actionStyle != lastActionStyle {
             lastActionStyle = actionStyle
             var config = UIButton.Configuration.plain()
             config.baseForegroundColor = .label
+            if reviewing {
+                config.image = UIImage(systemName: "checkmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold))
+                config.attributedTitle = AttributedString("Apply", attributes: AttributeContainer([.font: UIFont.systemFont(ofSize: 15, weight: .semibold)]))
+                config.imagePadding = 6; config.contentInsets = .zero
+                config.baseForegroundColor = .white
+                config.background.backgroundColor = .systemBlue
+                config.background.cornerRadius = 22
+                action.configuration = config
+            } else {
             config.image = busy ? nil : UIImage(systemName: !error.isEmpty ? "arrow.clockwise" : active ? "checkmark" : "waveform",
                 withConfiguration: branded ? UIImage.SymbolConfiguration(pointSize: 19, weight: .semibold) : toolbarSymbol)
             config.contentInsets = .zero
@@ -955,75 +1030,22 @@ final class KeyboardViewController: UIInputViewController {
                 config.background.cornerRadius = 22
             }
             action.configuration = config
+            }
         }
-        action.accessibilityLabel = !error.isEmpty ? "Retry dictation" : active ? "Finish and insert" : "\(appName), start dictation"
-        action.isEnabled = !busy
+        action.accessibilityLabel = reviewing ? "Apply changes" : !error.isEmpty ? "Retry dictation" : active ? (editPurpose ? "Finish speaking" : "Finish and insert") : "\(appName), start dictation"
+        action.isEnabled = reviewing ? !applying && (review?.included.contains(true) ?? false) : !busy
         if busy { spinner.startAnimating() } else { spinner.stopAnimating() }
 
         // A completed result can be inserted even after the app releases the mic and suspends.
         action.isHidden = false
         action.isAccessibilityElement = !needsOpen
-        if needsOpen {
-            linkHost?.view.isHidden = false
-            if linkHost == nil || linkDocument != document {
-                removeLink()
-                let requestID = UUID().uuidString
-                var url = URLComponents(string: "taptype://dictate")!
-                url.queryItems = [URLQueryItem(name: "id", value: requestID), URLQueryItem(name: "document", value: document)]
-                let host = UIHostingController(rootView: OpenVoiceApp(url: url.url!, name: appName,
-                    prepare: { [weak self] in
-                        guard let self, self.visible, self.document == document else { return false }
-                        let marker: [String: Any] = ["id": requestID, "document": document, "time": Date().timeIntervalSince1970]
-                        KeyboardBridge.write(marker, to: "handoff.json")
-                        KeyboardBridge.write(marker, to: "preparing.json")
-                        KeyboardBridge.write(marker, to: "keyboard-transition.json")
-                        self.playStartFeedback()
-                        UIView.performWithoutAnimation {
-                            self.refresh()
-                            self.coverTransition(id: requestID)
-                        }
-                        return true
-                    }, captureReturnTarget: { [weak self] in
-                        #if DEBUG
-                        guard let self, self.visible, self.document == document else { return }
-                        let bundle = await self.returnTargetResolver.resolve(for: self)
-                        let detail = self.returnTargetResolver.snapshot
-                        let now = Date().timeIntervalSince1970
-                        KeyboardBridge.write(["id": requestID, "document": document,
-                            "host": bundle ?? "", "time": now], to: "keyboard-host.json")
-                        KeyboardBridge.write(["build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "",
-                            "host": bundle ?? "none", "hostPID": detail.hostPID,
-                            "statePID": detail.statePID, "stateBundle": detail.stateBundle,
-                            "mapped": detail.mappedCount, "time": now], to: "keyboard-host-probe.json")
-                        NSLog("TapType keyboard return target: host=%@ hostPID=%d statePID=%d source=%@",
-                              bundle ?? "none", detail.hostPID, detail.statePID,
-                              detail.stateBundle.isEmpty ? "none" : detail.stateBundle)
-                        #endif
-                    }, canOpen: { [weak self] in
-                        self?.visible == true && self?.document == document && KeyboardBridge.read("preparing.json")["id"] as? String == requestID
-                    }, failed: { [weak self] in
-                        guard KeyboardBridge.read("preparing.json")["id"] as? String == requestID else { return }
-                        KeyboardBridge.write([:], to: "preparing.json")
-                        KeyboardBridge.write([:], to: "handoff.json")
-                        self?.localMessage = "Couldn’t open TapType. Please try again."
-                        self?.refresh()
-                        self?.revealTransition(id: requestID, animated: false)
-                    }))
-                // Match the ready-state UIKit button; host-app safe areas must not offset this 44pt control.
-                host.safeAreaRegions = []
-                addChild(host); actionSlot.addSubview(host.view)
-                host.view.translatesAutoresizingMaskIntoConstraints = false
-                NSLayoutConstraint.activate([
-                    host.view.leadingAnchor.constraint(equalTo: actionSlot.leadingAnchor),
-                    host.view.trailingAnchor.constraint(equalTo: actionSlot.trailingAnchor),
-                    host.view.topAnchor.constraint(equalTo: actionSlot.topAnchor),
-                    host.view.bottomAnchor.constraint(equalTo: actionSlot.bottomAnchor)
-                ])
-                host.view.backgroundColor = .clear; host.didMove(toParent: self)
-                linkHost = host; linkDocument = document
-            }
-        } else if preparing { linkHost?.view.isHidden = true }
-        else { removeLink() }
+        let showEdit = hasFullAccess && editEnabled && !active && !reviewing && !applying
+        editSlot.isHidden = !showEdit
+        syncLink(actionLink, in: actionSlot, needed: needsOpen && !reviewing, preparing: preparing, document: document)
+        syncLink(editLink, in: editSlot, needed: needsOpen && showEdit, preparing: preparing, document: document)
+        syncLink(replyLink, in: replySlot, needed: needsOpen && reviewing && !applying, preparing: preparing, document: document)
+        setKeyboardHeight(reviewing ? KeyboardMetrics.reviewHeight : KeyboardMetrics.height)
+        if reviewing { renderReview() }
 
         let layout = "\(dark)-\(upper)-\(numbers)-\(symbols)-\(needsInputModeSwitchKey)-\(textDocumentProxy.returnKeyType?.rawValue ?? 0)"
         if layout != lastLayout { lastLayout = layout; rebuildKeys() }
@@ -1059,16 +1081,91 @@ final class KeyboardViewController: UIInputViewController {
         })
     }
 
-    private func removeLink() {
-        linkHost?.willMove(toParent: nil); linkHost?.view.removeFromSuperview(); linkHost?.removeFromParent(); linkHost = nil
+    private func syncLink(_ link: VoiceLink, in slot: UIView, needed: Bool, preparing: Bool, document: String) {
+        if needed {
+            link.host?.view.isHidden = false
+            if link.host == nil || link.document != document {
+                removeLink(link)
+                installLink(link, in: slot, document: document)
+            }
+        } else if preparing { link.host?.view.isHidden = true }
+        else { removeLink(link) }
+    }
+    private func removeLink(_ link: VoiceLink) {
+        link.host?.willMove(toParent: nil); link.host?.view.removeFromSuperview(); link.host?.removeFromParent(); link.host = nil
+    }
+    /// Covers a button with one that opens TapType to start the microphone, for when the
+    /// app isn't running. Edit and review buttons first save the text the edit is about.
+    private func installLink(_ link: VoiceLink, in slot: UIView, document: String) {
+        let requestID = UUID().uuidString
+        var url = URLComponents(string: "taptype://dictate")!
+        url.queryItems = [URLQueryItem(name: "id", value: requestID), URLQueryItem(name: "document", value: document)]
+        if link.purpose != .dictate { url.queryItems?.append(URLQueryItem(name: "purpose", value: link.purpose.rawValue)) }
+        let label = link.purpose == .edit ? "Edit by voice" : link.purpose == .review ? "Reply by voice" : "\(appName), start dictation"
+        let purpose = link.purpose
+        let host = UIHostingController(rootView: OpenVoiceApp(url: url.url!, label: label,
+            prepare: { [weak self] in
+                guard let self, self.visible, self.document == document else { return false }
+                if purpose != .dictate, !self.writeEditRequest(id: requestID, document: document, purpose: purpose) {
+                    self.refresh(); return false
+                }
+                let marker: [String: Any] = ["id": requestID, "document": document, "time": Date().timeIntervalSince1970]
+                KeyboardBridge.write(marker, to: "handoff.json")
+                KeyboardBridge.write(marker, to: "preparing.json")
+                KeyboardBridge.write(marker, to: "keyboard-transition.json")
+                self.playStartFeedback()
+                UIView.performWithoutAnimation {
+                    self.refresh()
+                    self.coverTransition(id: requestID)
+                }
+                return true
+            }, captureReturnTarget: { [weak self] in
+                #if DEBUG
+                guard let self, self.visible, self.document == document else { return }
+                let bundle = await self.returnTargetResolver.resolve(for: self)
+                let detail = self.returnTargetResolver.snapshot
+                let now = Date().timeIntervalSince1970
+                KeyboardBridge.write(["id": requestID, "document": document,
+                    "host": bundle ?? "", "time": now], to: "keyboard-host.json")
+                KeyboardBridge.write(["build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "",
+                    "host": bundle ?? "none", "hostPID": detail.hostPID,
+                    "statePID": detail.statePID, "stateBundle": detail.stateBundle,
+                    "mapped": detail.mappedCount, "time": now], to: "keyboard-host-probe.json")
+                NSLog("TapType keyboard return target: host=%@ hostPID=%d statePID=%d source=%@",
+                      bundle ?? "none", detail.hostPID, detail.statePID,
+                      detail.stateBundle.isEmpty ? "none" : detail.stateBundle)
+                #endif
+            }, canOpen: { [weak self] in
+                self?.visible == true && self?.document == document && KeyboardBridge.read("preparing.json")["id"] as? String == requestID
+            }, failed: { [weak self] in
+                guard KeyboardBridge.read("preparing.json")["id"] as? String == requestID else { return }
+                KeyboardBridge.write([:], to: "preparing.json")
+                KeyboardBridge.write([:], to: "handoff.json")
+                self?.localMessage = "Couldn’t open TapType. Please try again."
+                self?.refresh()
+                self?.revealTransition(id: requestID, animated: false)
+            }))
+        // Match the ready-state UIKit button; host-app safe areas must not offset this 44pt control.
+        host.safeAreaRegions = []
+        addChild(host); slot.addSubview(host.view)
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            host.view.leadingAnchor.constraint(equalTo: slot.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: slot.trailingAnchor),
+            host.view.topAnchor.constraint(equalTo: slot.topAnchor),
+            host.view.bottomAnchor.constraint(equalTo: slot.bottomAnchor)
+        ])
+        host.view.backgroundColor = .clear; host.didMove(toParent: self)
+        link.host = host; link.document = document
     }
     @objc private func actionTapped() {
         guard let document else { return }
         guard hasFullAccess else { localMessage = "Settings → Keyboards → TapType → Allow Full Access"; refresh(); return }
+        if review != nil, ticket == nil { applyReview(); return }
         if var ticket, matches, (state["error"] as? String ?? "").isEmpty {
             DictationLatency.begin(id: ticket.id)
             if ticket.document != document {
-                ticket = DictationTicket(["id": ticket.id, "document": document, "created": ticket.created, "committed": true])!
+                ticket = DictationTicket(document: document, id: ticket.id, now: ticket.created, purpose: ticket.purpose)
             }
             ticket.committed = true
             KeyboardBridge.write(ticket.dictionary, to: "pending.json")
@@ -1101,7 +1198,411 @@ final class KeyboardViewController: UIInputViewController {
             KeyboardBridge.command("cancel", requestID: ticket.id)
             KeyboardBridge.write([:], to: "pending.json")
             self.ticket = nil; refresh()
+        } else if review != nil {
+            guard !applying else { return }
+            review = nil; localMessage = "Edit cancelled. Nothing changed."
+            if !directHaptics.play("cancel") { cancelHaptic?.impactOccurred() }
+            refresh()
         } else { dismissKeyboard() }
+    }
+
+    // MARK: Edit by voice
+
+    private func setUpEditControls() {
+        editButton.translatesAutoresizingMaskIntoConstraints = false
+        editButton.setImage(UIImage(systemName: "wand.and.sparkles",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 19, weight: .regular)), for: .normal)
+        editButton.tintColor = .label
+        editButton.layer.cornerRadius = 6
+        editButton.accessibilityLabel = "Edit by voice"
+        editButton.addTarget(self, action: #selector(editTapped), for: .touchUpInside)
+        editSlot.addSubview(editButton)
+        pin(editButton, to: editSlot)
+        editSlot.isHidden = true
+
+        reviewHeader.font = .systemFont(ofSize: 13, weight: .semibold)
+        reviewHeader.textColor = .secondaryLabel
+        reviewHeader.setContentHuggingPriority(.required, for: .vertical)
+        reviewText.isEditable = false
+        reviewText.isSelectable = false
+        reviewText.backgroundColor = UIColor.label.withAlphaComponent(0.06)
+        reviewText.layer.cornerRadius = 10
+        reviewText.textContainerInset = UIEdgeInsets(top: 8, left: 6, bottom: 8, right: 6)
+        reviewText.showsVerticalScrollIndicator = true
+        reviewText.accessibilityLabel = "Suggested change"
+        configure(reviewPrevious, symbol: "chevron.left", title: nil, label: "Previous change") { $0.reviewStep(-1) }
+        configure(reviewNext, symbol: "chevron.right", title: nil, label: "Next change") { $0.reviewStep(1) }
+        configure(reviewInclude, symbol: nil, title: "Skip", label: "Skip this change") { $0.toggleIncluded() }
+        configure(reviewCompare, symbol: nil, title: "Before", label: "Show the original text") { $0.toggleCompare() }
+        configure(replyButton, symbol: "mic.fill", title: "Reply", label: "Reply by voice") { $0.replyTapped() }
+        replyButton.translatesAutoresizingMaskIntoConstraints = false
+        replySlot.addSubview(replyButton)
+        pin(replyButton, to: replySlot)
+        let spacer = UIView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let controls = UIStackView(arrangedSubviews: [reviewPrevious, reviewNext, reviewInclude, reviewCompare, spacer, replySlot])
+        controls.axis = .horizontal; controls.spacing = 8; controls.alignment = .fill
+        controls.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        for button in [reviewPrevious, reviewNext] { button.widthAnchor.constraint(equalToConstant: 40).isActive = true }
+        replySlot.widthAnchor.constraint(equalToConstant: 92).isActive = true
+        let stack = UIStackView(arrangedSubviews: [reviewHeader, reviewText, controls])
+        stack.axis = .vertical; stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        reviewPanel.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: reviewPanel.leadingAnchor, constant: 2),
+            stack.trailingAnchor.constraint(equalTo: reviewPanel.trailingAnchor, constant: -2),
+            stack.topAnchor.constraint(equalTo: reviewPanel.topAnchor, constant: -8),
+            stack.bottomAnchor.constraint(equalTo: reviewPanel.bottomAnchor)
+        ])
+        reviewPanel.isHidden = true
+    }
+
+    private func pin(_ view: UIView, to slot: UIView) {
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: slot.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: slot.trailingAnchor),
+            view.topAnchor.constraint(equalTo: slot.topAnchor),
+            view.bottomAnchor.constraint(equalTo: slot.bottomAnchor)
+        ])
+    }
+
+    private func configure(_ button: UIButton, symbol: String?, title: String?, label: String,
+                           action: @escaping (KeyboardViewController) -> Void) {
+        var config = UIButton.Configuration.gray()
+        config.cornerStyle = .capsule
+        config.baseForegroundColor = .label
+        config.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 10, bottom: 4, trailing: 10)
+        if let symbol { config.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold)) }
+        if let title { config.attributedTitle = AttributedString(title, attributes: AttributeContainer([.font: UIFont.systemFont(ofSize: 14, weight: .medium)])) }
+        config.imagePadding = 5
+        button.configuration = config
+        button.accessibilityLabel = label
+        button.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            self.keyHaptic?.impactOccurred(intensity: 0.5)
+            action(self)
+        }, for: .touchUpInside)
+    }
+
+    private func setTitle(_ title: String, of button: UIButton, label: String) {
+        guard var config = button.configuration else { return }
+        config.attributedTitle = AttributedString(title, attributes: AttributeContainer([.font: UIFont.systemFont(ofSize: 14, weight: .medium)]))
+        button.configuration = config
+        button.accessibilityLabel = label
+    }
+
+    private func setKeyboardHeight(_ height: CGFloat) {
+        guard height != keyboardHeight else { return }
+        keyboardHeight = height
+        heightConstraint.constant = height
+        keyboardView?.height = height
+        view.setNeedsLayout()
+    }
+
+    /// The text iOS lets the keyboard see around the cursor, trimmed to what an edit can use.
+    private func currentContext() -> VoiceEditContext {
+        let proxy = textDocumentProxy
+        return VoiceEditPlanner.window(VoiceEditContext(before: proxy.documentContextBeforeInput ?? "",
+            selected: proxy.selectedText ?? "", after: proxy.documentContextAfterInput ?? ""))
+    }
+
+    /// Saves what the edit is about before the instruction is spoken: the visible text,
+    /// the last dictation, and when replying, the suggestion being reviewed.
+    private func writeEditRequest(id: String, document: String, purpose: DictationPurpose) -> Bool {
+        let request: VoiceEditRequest
+        if purpose == .review, let review {
+            request = VoiceEditRequest(id: id, document: document, context: review.context,
+                lastDictation: lastDictation(for: document, in: review.context),
+                instruction: review.isUndo ? "" : review.instruction, previous: review.matches.map(\.change))
+        } else {
+            let context = currentContext()
+            guard !context.full.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                localMessage = "There’s no text here to edit yet."
+                return false
+            }
+            request = VoiceEditRequest(id: id, document: document, context: context,
+                                       lastDictation: lastDictation(for: document, in: context))
+        }
+        editRequest = request
+        KeyboardBridge.write(request.dictionary, to: "voice-edit-request.json")
+        return true
+    }
+
+    private func lastDictation(for document: String, in context: VoiceEditContext) -> String {
+        let last = KeyboardBridge.read("voice-edit-last.json")
+        guard last["document"] as? String == document, let text = last["text"] as? String,
+              !text.isEmpty, context.full.contains(text) else { return "" }
+        return text
+    }
+
+    @objc private func editTapped() {
+        guard let document, hasFullAccess, ticket == nil, review == nil, !applying else { return }
+        startInstruction(.edit, document: document)
+    }
+
+    private func replyTapped() {
+        guard let document, hasFullAccess, ticket == nil, review != nil, !applying else { return }
+        startInstruction(.review, document: document)
+    }
+
+    private func startInstruction(_ purpose: DictationPurpose, document: String) {
+        guard alive else { localMessage = "Open TapType to reconnect."; refresh(); return }
+        let next = DictationTicket(document: document, purpose: purpose)
+        guard writeEditRequest(id: next.id, document: document, purpose: purpose) else { refresh(); return }
+        KeyboardBridge.write(next.dictionary, to: "pending.json")
+        KeyboardBridge.command("start", requestID: next.id, purpose: purpose)
+        ticket = next; localMessage = nil
+        playStartFeedback()
+        refresh()
+    }
+
+    private func finishInstruction(_ ticket: DictationTicket, outcome: VoiceEditOutcome, document: String) {
+        KeyboardBridge.command("clear", requestID: ticket.id)
+        if state["microphoneActive"] as? Bool == false { KeyboardBridge.write([:], to: "state.json") }
+        KeyboardBridge.write([:], to: "pending.json")
+        self.ticket = nil
+        localMessage = nil
+        let request = editRequest?.id == ticket.id ? editRequest : VoiceEditRequest(KeyboardBridge.read("voice-edit-request.json"))
+        switch outcome.kind {
+        case .failed:
+            localMessage = outcome.message
+        case .undo:
+            startUndoReview(document: document)
+        case .command:
+            if let command = outcome.command { handle(command) }
+        case .suggestion:
+            guard let request, request.id == ticket.id else { localMessage = "Couldn’t show that edit. Please try again."; return }
+            switch VoiceEditPlanner.plan(outcome.changes, in: request.context.full, instruction: outcome.instruction,
+                                         preferred: request.preferredRange) {
+            case .success(let matches):
+                review = Review(document: document, instruction: outcome.instruction, context: request.context,
+                                matches: matches, included: Array(repeating: true, count: matches.count))
+                playFinishFeedback()
+            case .failure(let issue):
+                localMessage = issue.message
+            }
+        }
+    }
+
+    private func handle(_ command: VoiceReviewCommand) {
+        guard var review else { return }
+        switch command {
+        case .apply: applyReview()
+        case .cancel:
+            self.review = nil; localMessage = "Edit cancelled. Nothing changed."
+        case .undo, .refine:
+            localMessage = "Say “apply”, “cancel”, or what to change."
+        case .showBefore: review.showBefore = true; self.review = review
+        case .showAfter: review.showBefore = false; self.review = review
+        case .applyOnly(let positions):
+            let chosen = Set(VoiceReviewCommand.indexes(positions, count: review.matches.count))
+            guard !chosen.isEmpty else { localMessage = "There are only \(review.matches.count) changes."; return }
+            review.included = review.matches.indices.map { chosen.contains($0) }
+            self.review = review
+            applyReview()
+        case .skip(let positions):
+            for index in VoiceReviewCommand.indexes(positions, count: review.matches.count) { review.included[index] = false }
+            self.review = review
+            localMessage = review.included.contains(true) ? nil : "All changes skipped. Say “cancel”, or include one."
+        }
+    }
+
+    /// Undo is shown for approval like any other edit.
+    private func startUndoReview(document: String) {
+        let saved = KeyboardBridge.read("voice-edit-undo.json")
+        let changes = VoiceEditChange.list(saved["changes"])
+        guard saved["document"] as? String == document, !changes.isEmpty else {
+            localMessage = "There’s no edit to undo here."
+            return
+        }
+        let context = currentContext()
+        switch VoiceEditPlanner.plan(changes, in: context.full, instruction: "", trusted: true) {
+        case .success(let matches):
+            review = Review(document: document, instruction: "Undo", context: context, matches: matches,
+                            included: Array(repeating: true, count: matches.count), isUndo: true)
+        case .failure:
+            localMessage = "Your text changed since that edit, so it can’t be undone."
+        }
+    }
+
+    private func reviewStep(_ delta: Int) {
+        guard var review, !review.matches.isEmpty else { return }
+        review.index = (review.index + delta + review.matches.count) % review.matches.count
+        review.showBefore = false
+        self.review = review; refresh()
+    }
+    private func toggleIncluded() {
+        guard var review else { return }
+        review.included[review.index].toggle()
+        self.review = review; refresh()
+    }
+    private func toggleCompare() {
+        guard var review else { return }
+        review.showBefore.toggle()
+        self.review = review; refresh()
+    }
+
+    private var lastReviewRender = ""
+    /// Draws the current change: removed words in red with a line through them, added
+    /// words in green, and a little unchanged text around it in grey.
+    private func renderReview() {
+        guard let review, review.matches.indices.contains(review.index) else { return }
+        let match = review.matches[review.index]
+        let included = review.included[review.index]
+        let key = "\(review.instruction)|\(review.index)|\(review.showBefore)|\(included)|\(review.matches.count)|\(dark)|\(applying)"
+        guard key != lastReviewRender else { return }
+        lastReviewRender = key
+        let characters = Array(review.context.full)
+        let radius = 70
+        let from = max(0, match.start - radius), to = min(characters.count, match.end + radius)
+        let prefix = (from > 0 ? "…" : "") + String(characters[from..<match.start])
+        let suffix = String(characters[match.end..<to]) + (to < characters.count ? "…" : "")
+        let pieces = VoiceEditDiff.pieces(from: match.change.original, to: match.change.replacement)
+        let rewrite = VoiceEditDiff.changedFraction(pieces) > 0.6
+        let base: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: 16), .foregroundColor: UIColor.label]
+        let quiet = base.merging([.foregroundColor: UIColor.tertiaryLabel]) { $1 }
+        let removed = base.merging([.foregroundColor: UIColor.systemRed, .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+            .strikethroughColor: UIColor.systemRed, .backgroundColor: UIColor.systemRed.withAlphaComponent(0.12)]) { $1 }
+        let added = base.merging([.foregroundColor: dark ? UIColor.systemGreen : UIColor(red: 0.05, green: 0.5, blue: 0.2, alpha: 1),
+            .backgroundColor: UIColor.systemGreen.withAlphaComponent(0.18),
+            .font: UIFont.systemFont(ofSize: 16, weight: .semibold)]) { $1 }
+        let text = NSMutableAttributedString(string: prefix, attributes: quiet)
+        if review.showBefore {
+            text.append(NSAttributedString(string: match.change.original, attributes: base))
+        } else if rewrite {
+            // A big rewrite would be unreadable word by word: show the new version, new words in green.
+            for piece in pieces where piece.kind != .removed {
+                text.append(NSAttributedString(string: piece.text, attributes: piece.kind == .added ? added : base))
+            }
+        } else {
+            for piece in pieces {
+                text.append(NSAttributedString(string: piece.text, attributes: piece.kind == .added ? added : piece.kind == .removed ? removed : base))
+            }
+        }
+        text.append(NSAttributedString(string: suffix, attributes: quiet))
+        reviewText.attributedText = text
+        reviewText.alpha = included ? 1 : 0.45
+        reviewText.setContentOffset(.zero, animated: false)
+        let count = review.matches.count
+        var header = review.isUndo ? "Undo · put back your earlier text" : count == 1 ? "1 change" : "Change \(review.index + 1) of \(count)"
+        if review.showBefore { header += " · Before" } else if rewrite { header += " · New version" }
+        if !included { header += " · Skipped" }
+        reviewHeader.text = header
+        reviewPrevious.isHidden = count < 2
+        reviewNext.isHidden = count < 2
+        reviewInclude.isHidden = count < 2
+        setTitle(included ? "Skip" : "Include", of: reviewInclude, label: included ? "Skip this change" : "Include this change")
+        setTitle(review.showBefore ? "After" : "Before", of: reviewCompare,
+                 label: review.showBefore ? "Show the suggested change" : "Show the original text")
+        for button in [reviewPrevious, reviewNext, reviewInclude, reviewCompare, replyButton] { button.isEnabled = !applying }
+    }
+
+    /// Writes the approved changes into the text field, after checking the text is still
+    /// what was reviewed.
+    private func applyReview() {
+        guard let review, !applying, let document, document == review.document else { return }
+        let chosen = zip(review.matches, review.included).filter(\.1).map(\.0)
+        guard !chosen.isEmpty else { localMessage = "All changes are skipped."; refresh(); return }
+        let now = currentContext()
+        var located: [VoiceEditMatch]?
+        // Usually nothing moved: every change is still at the same place relative to the cursor.
+        let shift = now.cursor - review.context.cursor
+        let nowCharacters = Array(now.full)
+        let unchanged = chosen.allSatisfy { match in
+            let start = match.start + shift, end = match.end + shift
+            return start >= 0 && end <= nowCharacters.count && String(nowCharacters[start..<end]) == match.change.original
+        }
+        if unchanged { located = chosen.map { VoiceEditMatch(change: $0.change, start: $0.start + shift, end: $0.end + shift) } }
+        else if case .success(let found) = VoiceEditPlanner.plan(chosen.map(\.change), in: now.full, instruction: "", trusted: true) {
+            located = found
+        }
+        guard let located else {
+            localMessage = "Your text changed since the suggestion. Say the edit again."
+            self.review = nil; refresh(); return
+        }
+        applying = true; refresh()
+        Task { @MainActor in
+            let applied = await perform(located, in: now)
+            applying = false
+            if applied.isEmpty {
+                localMessage = "Couldn’t change the text in this app. Nothing was changed."
+            } else {
+                if !review.isUndo {
+                    KeyboardBridge.write(["document": document, "time": Date().timeIntervalSince1970,
+                        "changes": VoiceEditPlanner.undo(for: applied, in: now.full).map(\.pair)], to: "voice-edit-undo.json")
+                } else { KeyboardBridge.write([:], to: "voice-edit-undo.json") }
+                let skipped = located.count - applied.count
+                localMessage = skipped > 0 ? "Applied \(applied.count) of \(located.count). The rest couldn’t be placed."
+                    : review.isUndo ? "Undone." : "Done. Say “undo” with the wand to put it back."
+                playFinishFeedback()
+            }
+            self.review = nil
+            refresh()
+        }
+    }
+
+    /// Replaces each change in the host app's text, last one first so earlier positions
+    /// don't move. Before deleting anything it checks the cursor really is at the end of
+    /// the passage; if not, it stops. Returns the changes it made.
+    private func perform(_ matches: [VoiceEditMatch], in context: VoiceEditContext) async -> [VoiceEditMatch] {
+        let proxy = textDocumentProxy
+        var text = Array(context.full)
+        // With a selection, the cursor may count from either end of it.
+        var cursors = [context.cursor]
+        if !context.selected.isEmpty { cursors.append(context.cursor + context.selected.count) }
+        var applied: [VoiceEditMatch] = []
+        for match in matches.sorted(by: { $0.start > $1.start }) {
+            guard await moveCursor(to: match.end, from: cursors, in: text) else { break }
+            for _ in 0..<(match.end - match.start) { proxy.deleteBackward() }
+            if !match.change.replacement.isEmpty { proxy.insertText(match.change.replacement) }
+            text.replaceSubrange(match.start..<match.end, with: Array(match.change.replacement))
+            cursors = [match.start + match.change.replacement.count]
+            applied.append(match)
+        }
+        // Put the cursor back where it was, moved along with the text.
+        if !applied.isEmpty {
+            let target = VoiceEditPlanner.cursor(after: applied, from: context.cursor + context.selected.count)
+            _ = await moveCursor(to: target, from: cursors, in: text)
+        }
+        return applied
+    }
+
+    private func moveCursor(to target: Int, from cursors: [Int], in text: [Character]) async -> Bool {
+        let proxy = textDocumentProxy
+        guard (0...text.count).contains(target) else { return false }
+        for cursor in cursors {
+            if cursor != target { proxy.adjustTextPosition(byCharacterOffset: target - cursor) }
+            if await cursorSettles(at: target, in: text) { return true }
+            // Some apps count UTF-16 units rather than characters (emoji, accents).
+            let units = String(text[min(cursor, target)..<max(cursor, target)]).utf16.count * (target >= cursor ? 1 : -1)
+            if units != target - cursor {
+                proxy.adjustTextPosition(byCharacterOffset: units - (target - cursor))
+                if await cursorSettles(at: target, in: text) { return true }
+                proxy.adjustTextPosition(byCharacterOffset: -(units - (target - cursor)))
+            }
+            if cursor != target { proxy.adjustTextPosition(byCharacterOffset: cursor - target) }
+            _ = await cursorSettles(at: cursor, in: text)
+        }
+        return false
+    }
+
+    /// Waits briefly for the host to report the new cursor, then checks the text on both
+    /// sides of it matches what we expect at `position`.
+    private func cursorSettles(at position: Int, in text: [Character]) async -> Bool {
+        let expectedBefore = String(text[..<position]), expectedAfter = String(text[position...])
+        for attempt in 0..<12 {
+            if attempt > 0 { try? await Task.sleep(for: .milliseconds(30)) }
+            let before = textDocumentProxy.documentContextBeforeInput ?? ""
+            let after = textDocumentProxy.documentContextAfterInput ?? ""
+            let beforeMatches = before.isEmpty ? (expectedBefore.isEmpty || expectedBefore.hasSuffix("\n"))
+                : expectedBefore.hasSuffix(before) || before.hasSuffix(expectedBefore)
+            let afterMatches = after.isEmpty ? (expectedAfter.isEmpty || expectedAfter.hasPrefix("\n"))
+                : expectedAfter.hasPrefix(after) || after.hasPrefix(expectedAfter)
+            // Require some real evidence, not two empty strings in the middle of a paragraph.
+            if beforeMatches && afterMatches && (before.count + after.count > 0 || text.isEmpty) { return true }
+        }
+        return false
     }
 
     private func rebuildKeys() {
@@ -1152,6 +1653,10 @@ final class KeyboardViewController: UIInputViewController {
         if returnTitle != "return" { enter.backgroundColor = .systemBlue; enter.setTitleColor(.white, for: .normal) }
         bottom.addArrangedSubview(enter)
         enter.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.23).isActive = true
+        // Edit by voice sits in the bottom-right corner, styled like a special key.
+        editButton.backgroundColor = dark ? UIColor(white: 0.24, alpha: 1) : UIColor(white: 0.68, alpha: 1)
+        bottom.addArrangedSubview(editSlot)
+        editSlot.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.12).isActive = true
         keys.addArrangedSubview(bottom)
     }
     private func deleteKey() -> UIButton {

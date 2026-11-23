@@ -34,10 +34,13 @@ struct ContentView: View {
                     Toggle("Live preview", isOn: $speech.showsLivePreview)
                         .tint(.green)
                         .disabled(speech.isStarting || speech.isRecording)
+                    Toggle("Edit by voice", isOn: $speech.voiceEditEnabled)
+                        .tint(.green)
                 } footer: {
                     Text(speech.readinessMinutes == 0 ? "Mic off after each dictation." : "Mic on while ready. Idle audio discarded.")
                     if speech.reducesNoise { Text("Uses Apple’s voice processing to focus on your voice. Other audio may get quieter while the mic is on.") }
                     if speech.showsLivePreview { Text("Shows your words in the keyboard as you speak. With downloaded models, Apple Speech shows them first.") }
+                    if speech.voiceEditEnabled && !VoiceEditor.isAvailable { Text("Edit by voice needs Apple Intelligence, or a cloud writing model under Writing.") }
                     if let notice = speech.activityNotice { Text(notice) }
                 }
 
@@ -63,6 +66,7 @@ struct ContentView: View {
                             faq("Do my words leave my iPhone?", "Apple Speech and Apple cleanup run on this iPhone. Downloaded Whisper models stay local too. If you choose a cloud model, completed phrases are sent while you speak and provider charges apply. Idle audio is discarded.")
                             faq("Why does TapType open?", "The first tap starts a microphone session. Repeat taps stay in your keyboard while the session is ready. After the session expires, an interruption, or force-quitting TapType, it may need to open again.")
                             faq("Are transcripts saved?", "Completed originals are saved only on this iPhone, with local dates and times. History stays on this device. Earlier dictations cannot be recovered.")
+                            faq("How does Edit by voice work?", "Turning it on adds an Edit button (the wand) to the keyboard. Tap it and say what to change, like “make this a bulleted list” or “in the second paragraph, change Friday to Monday”. Name a part (“the second bullet”, “the paragraph about the budget”, “all of it”), or it edits your selection, or else your last dictation. The changes are highlighted for you to approve, skip, adjust or cancel by voice or tap before anything changes. Say “undo” to put text back. A keyboard can only see the text near the cursor, so very long notes are edited around where you are.")
                             faq("Why Full Access?", "It lets the keyboard exchange dictation commands and text with this app.")
                             faq("How does cleanup work?", "Speech and writing models are separate choices. Cleanup removes fillers; Rewrite improves phrasing. Style sets the tone: Formal, Casual, Very casual or Excited. If cleanup fails, your original words are kept.")
                         }.padding(.vertical, 8)
@@ -196,6 +200,7 @@ struct ContentView: View {
             let args = ProcessInfo.processInfo.arguments
             if args.contains("--text-preview") { speech.editCompleted("Please send five copies to Maya."); return }
             if args.contains("--audio-probe") { await PipelineChecks.audioProbe(); return }
+            if args.contains("--voice-edit-check") { await PipelineChecks.voiceEditCheck(); return }
             if args.contains("--readiness-test") { await speech.testReadiness(); return }
             if args.contains("--apple-benchmark") || args.contains("--cloud-benchmark") { await speech.testAppleStreaming(); return }
             if args.contains("--apple-assets") {
