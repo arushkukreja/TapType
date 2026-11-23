@@ -147,6 +147,34 @@ enum PipelineChecks {
         sink.append(buffer); check(!sink.isCapturing && sink.level == 0, "post_stop_audio_discarded")
         print("PIPELINE_CHECKS_COMPLETE: \(n)")
     }
+    /// Runs real edits through the writing model and prints what it suggests. Launch with
+    /// --voice-edit-check. Needs Apple Intelligence (or a cloud writing model).
+    @MainActor
+    static func voiceEditCheck() async {
+        setbuf(stdout, nil)
+        let note = "Groceries milk eggs bread and coffee.\n\nMeeting notes. We need to finalize the budget by Friday. Maya will send the slides. Sam is out next week."
+        let cases: [(String, String, String)] = [
+            ("make the groceries a bulleted list", note, ""),
+            ("in the meeting notes change Friday to Monday", note, ""),
+            ("delete the sentence about Sam", note, ""),
+            ("make it more formal", "hey can u send me the file asap thx", "hey can u send me the file asap thx"),
+            ("turn all of it into meeting notes with action items", note, "")
+        ]
+        print("VOICE_EDIT_AVAILABLE: \(VoiceEditor.isAvailable)")
+        for (index, item) in cases.enumerated() {
+            let request = VoiceEditRequest(id: "check-\(index)", document: "d", context: VoiceEditContext(before: item.1), lastDictation: item.2)
+            let started = ProcessInfo.processInfo.systemUptime
+            let outcome = await VoiceEditor.respond(to: item.0, purpose: .edit, request: request, id: request.id)
+            let seconds = String(format: "%.1f", ProcessInfo.processInfo.systemUptime - started)
+            print("VOICE_EDIT: \(item.0) -> \(outcome.kind.rawValue) in \(seconds)s \(outcome.message)")
+            for change in outcome.changes { print("  - \(change.original.debugDescription)\n  + \(change.replacement.debugDescription)") }
+        }
+        let reply = await VoiceEditor.respond(to: "skip the second", purpose: .review,
+            request: VoiceEditRequest(id: "r", document: "d", context: VoiceEditContext(before: note), instruction: "x"), id: "r")
+        print("VOICE_EDIT_REPLY: \(reply.kind.rawValue) \(reply.command?.name ?? "")")
+        print("VOICE_EDIT_CHECK_DONE")
+    }
+
     static func audioProbe() async {
         setbuf(stdout, nil)
         let audio = AVAudioSession.sharedInstance()

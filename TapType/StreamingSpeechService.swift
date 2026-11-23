@@ -420,3 +420,12 @@ final class AppleSpeechAssets: ObservableObject {
     }
     func cancel() { task?.cancel() }
 }
+
+#if DEBUG
+/// Hears nothing. Used only to test edit by voice in the simulator, where live speech can't run.
+struct SilentSpeech: StreamingSpeech {
+    func start(input: AsyncStream<CapturedAudio>, format: AVAudioFormat) async throws {}
+    func finish() async throws {}
+    func cancel() async {}
+}
+#endif

@@ -48,6 +48,14 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     @Published var showsLivePreview = UserDefaults.standard.object(forKey: "livePreview") as? Bool ?? true {
         didSet { UserDefaults.standard.set(showsLivePreview, forKey: "livePreview"); publish() }
     }
+    /// Shows the Edit button in the keyboard. Stored in the App Group for the keyboard.
+    @Published var voiceEditEnabled = VoiceEditPreference.enabled {
+        didSet { VoiceEditPreference.enabled = voiceEditEnabled; publish() }
+    }
+    /// Whether this dictation is text to insert or an edit instruction.
+    @Published private(set) var purpose = DictationPurpose.dictate
+    @Published private(set) var isEditing = false
+    private var voiceEditOutcome: VoiceEditOutcome?
     private let engine = AVAudioEngine()
     private let sink = StreamingAudioSink()
     private var speechService: (any StreamingSpeech)?
@@ -145,7 +153,7 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     private func startTimer() {
         if timer == nil { timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in Task { @MainActor in self?.tick() } } }
     }
-    func start(requestID: String = UUID().uuidString) async {
+    func start(requestID: String = UUID().uuidString, purpose: DictationPurpose = .dictate) async {
         guard !isStarting, !isRecording, !isProcessing else { return }
         let preparation = preparationGeneration
         await teardown?.value; teardown = nil
@@ -154,10 +162,12 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         guard preparation == preparationGeneration, sessionEnabled, !isStarting, !isRecording, !isProcessing else { return }
         isStarting = true; generation = UUID(); let epoch = generation
         transcriptID = requestID; errorMessage = nil; cleanupNotice = nil
+        self.purpose = purpose; voiceEditOutcome = nil; isEditing = false
         transcript = ""; originalTranscript = ""; provisionalTranscript = ""; finalizedTranscript = ""; refinedTranscript = ""
         finalResult = false; commitRequested = false; awaitingConfirmation = false
         performance.begin()
-        let mode = CleanupMode.selected
+        // An edit instruction is used as spoken: no cleanup or speaking style.
+        let mode = purpose == .dictate ? CleanupMode.selected : .original
         do {
             let provider = SpeechProvider.selected
             if provider.downloaded {
@@ -179,7 +189,14 @@ final class SpeechRecognizer: NSObject, ObservableObject {
             cleanupService = text
             let failure: @Sendable () async -> Void = { [weak self] in await self?.recognitionFailed(epoch: epoch) }
             let service: any StreamingSpeech
-            if provider == .apple { service = AppleSpeechService(text: text, failure: failure) }
+            #if DEBUG
+            // The simulator can't run live speech: a silent stand-in lets edits be tested.
+            let silent = purpose != .dictate && UserDefaults.standard.bool(forKey: "debugVoiceEditFake")
+            #else
+            let silent = false
+            #endif
+            if silent { service = SilentSpeech() }
+            else if provider == .apple { service = AppleSpeechService(text: text, failure: failure) }
             else if provider == .openAI, let selection { service = OpenAIStreamingSpeech(selection: selection, text: text, failure: failure) }
             else if provider.downloaded && showsLivePreview { service = HybridSpeechService(provider: provider, text: text, failure: failure) }
             else { service = PhraseSpeechService(provider: provider, selection: selection, text: text, failure: failure) }
@@ -218,7 +235,7 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     }
     func stop() {
         guard isRecording, let service = speechService, let text = cleanupService else { publish(); return }
-        isRecording = false; isProcessing = true; isCleaning = CleanupMode.selected != .original
+        isRecording = false; isProcessing = true; isCleaning = purpose == .dictate && CleanupMode.selected != .original
         performance.mark("stop"); sink.end(); watchdog?.cancel()
         beginFinishingTime(); settleMicrophone(); publish()
         let epoch = generation
@@ -235,6 +252,10 @@ final class SpeechRecognizer: NSObject, ObservableObject {
             watchdog?.cancel(); DictationLatency.mark("transcribed", id: transcriptID)
             let result = await text.finish()
             guard !Task.isCancelled, generation == epoch else { return }
+            if purpose != .dictate {
+                await finishEdit(instruction: result.finalized, epoch: epoch)
+                return
+            }
             // The speaking style formats only finished text; Original stays untouched.
             let styled = CleanupMode.selected == .original ? result.refined : SpeakingStyle.selected.apply(result.refined)
             transcript = styled; originalTranscript = result.finalized
@@ -256,6 +277,28 @@ final class SpeechRecognizer: NSObject, ObservableObject {
             status = "Ready"; settleMicrophone(); publish(); endFinishingTime()
         }
     }
+    /// Works out the edit once the instruction is transcribed. The result goes to the
+    /// keyboard for review; nothing is inserted and the instruction isn't saved to history.
+    private func finishEdit(instruction spoken: String, epoch: UUID) async {
+        var instruction = spoken
+        #if DEBUG
+        // The simulator can't speak: a typed test instruction stands in for silence.
+        if instruction.isEmpty, let typed = UserDefaults.standard.string(forKey: "debugVoiceEditInstruction") { instruction = typed }
+        #endif
+        transcript = instruction; originalTranscript = instruction
+        provisionalTranscript = ""; finalizedTranscript = instruction; refinedTranscript = instruction
+        isEditing = true; publish()
+        let id = transcriptID
+        let request = VoiceEditRequest(KeyboardBridge.read("voice-edit-request.json")).flatMap { $0.id == id ? $0 : nil }
+        let outcome = await VoiceEditor.respond(to: instruction, purpose: purpose, request: request, id: id)
+        guard !Task.isCancelled, generation == epoch else { return }
+        voiceEditOutcome = outcome; isEditing = false
+        finalResult = true; awaitingConfirmation = false
+        isProcessing = false; isCleaning = false
+        DictationLatency.mark("cleaned", id: id); performance.end(outcome: "edit")
+        speechService = nil; cleanupService = nil; finishTask = nil
+        status = "Ready"; settleMicrophone(); publish(); endFinishingTime()
+    }
     private func tick() {
         performance.sample(); audioLevel = isRecording ? sink.level : 0
         let levels = sink.drainLevels()
@@ -276,16 +319,17 @@ final class SpeechRecognizer: NSObject, ObservableObject {
             if Date().timeIntervalSince1970 - (command["time"] as? Double ?? 0) < 5 {
                 if command["action"] as? String == "start" {
                     let id = command["requestID"] as? String ?? UUID().uuidString
+                    let purpose = DictationPurpose(command["purpose"])
                     if isStarting || isRecording || isProcessing {
                         // Tell the keyboard instead of ignoring it until its 5-second timeout.
                         refusedStart = (id, isProcessing ? "Still finishing your last dictation. Tap retry in a moment." : "Already starting. Tap retry in a moment.")
-                    } else { Task { await start(requestID: id) } }
+                    } else { Task { await start(requestID: id, purpose: purpose) } }
                 }
                 else if command["requestID"] as? String == transcriptID {
                     switch command["action"] as? String {
                     case "commit": commitRequested = true; awaitingConfirmation = false; stop()
                     case "cancel": cancelDictation()
-                    case "clear": transcript = ""; finalResult = false; commitRequested = false; awaitingConfirmation = false
+                    case "clear": transcript = ""; finalResult = false; commitRequested = false; awaitingConfirmation = false; voiceEditOutcome = nil
                     default: break
                     }
                 }
@@ -295,7 +339,10 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     }
     private func publish() {
         KeyboardBridge.write(["heartbeat": sessionEnabled || isProcessing || isStarting ? Date().timeIntervalSince1970 : 0,
-            "recording": isRecording, "processing": isProcessing || isStarting, "text": finalResult ? transcript : "",
+            // Edit instructions are never sent as text to insert.
+            "recording": isRecording, "processing": isProcessing || isStarting, "text": finalResult && purpose == .dictate ? transcript : "",
+            "purpose": purpose.rawValue, "editing": isEditing, "voiceEdit": voiceEditOutcome?.dictionary ?? [:],
+            "voiceEditEnabled": voiceEditEnabled,
             "microphoneActive": engine.isRunning, "ready": isReadyBetweenDictations, "transcriptID": transcriptID,
             "level": audioLevel, "final": finalResult, "commitRequested": commitRequested,
             "awaitingConfirmation": awaitingConfirmation, "cleaning": isCleaning,
@@ -317,6 +364,7 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         isStarting = false; isRecording = false; isProcessing = false; isCleaning = false
         transcript = ""; originalTranscript = ""; provisionalTranscript = ""; finalizedTranscript = ""; refinedTranscript = ""
         finalResult = false; commitRequested = false; awaitingConfirmation = false
+        isEditing = false; voiceEditOutcome = nil
         performance.end(outcome: "cancelled"); settleMicrophone(); publish(); endFinishingTime()
     }
     func disableSession() { cancelDictation(); releaseMicrophone(); KeyboardBridge.write([:], to: "pending.json"); publish() }
@@ -390,9 +438,10 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         if isRecording || isProcessing { cancelDictation() }
         await enableSession()
         guard sessionEnabled else { return }
-        let ticket = DictationTicket(document: document, id: id)
+        let purpose = DictationPurpose(components.queryItems?.first(where: { $0.name == "purpose" })?.value)
+        let ticket = DictationTicket(document: document, id: id, purpose: purpose)
         KeyboardBridge.write(ticket.dictionary, to: "pending.json")
-        await start(requestID: id)
+        await start(requestID: id, purpose: purpose)
         #if DEBUG
         await DevKeyboardReturn.shared.returnAfterStart(since: handoffBegan, requestID: id) { [weak self] in
             self?.isRecording == true && self?.transcriptID == id

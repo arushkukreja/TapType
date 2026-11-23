@@ -104,8 +104,8 @@ enum KeyboardBridge {
               let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
         return result
     }
-    static func command(_ action: String, requestID: String = "") {
-        write(["id": UUID().uuidString, "action": action, "requestID": requestID,
+    static func command(_ action: String, requestID: String = "", purpose: DictationPurpose = .dictate) {
+        write(["id": UUID().uuidString, "action": action, "requestID": requestID, "purpose": purpose.rawValue,
                "time": Date().timeIntervalSince1970], to: "command.json")
         BridgeSignal.post(.command)
     }
@@ -180,22 +180,27 @@ struct DictationTicket {
     let document: String
     let created: Double
     var committed: Bool
+    /// Edit and review tickets carry instructions; their words are never inserted.
+    var purpose: DictationPurpose
 
-    init(document: String, id: String = UUID().uuidString, now: Double = Date().timeIntervalSince1970) {
-        self.id = id; self.document = document; created = now; committed = false
+    init(document: String, id: String = UUID().uuidString, now: Double = Date().timeIntervalSince1970,
+         purpose: DictationPurpose = .dictate) {
+        self.id = id; self.document = document; created = now; committed = false; self.purpose = purpose
     }
     init?(_ value: [String: Any]) {
         guard let id = value["id"] as? String, let document = value["document"] as? String,
               let created = value["created"] as? Double else { return nil }
         self.id = id; self.document = document; self.created = created
         committed = value["committed"] as? Bool ?? false
+        purpose = DictationPurpose(value["purpose"])
     }
     var dictionary: [String: Any] {
-        ["id": id, "document": document, "created": created, "committed": committed]
+        ["id": id, "document": document, "created": created, "committed": committed, "purpose": purpose.rawValue]
     }
     func textToInsert(from state: [String: Any], document: String, insertedID: String?,
                       now: Double = Date().timeIntervalSince1970) -> String? {
-        guard committed, self.document == document, now - created >= 0, now - created < Self.lifetime,
+        guard purpose == .dictate, DictationPurpose(state["purpose"]) == .dictate,
+              committed, self.document == document, now - created >= 0, now - created < Self.lifetime,
               id != insertedID, state["transcriptID"] as? String == id,
               state["final"] as? Bool == true,
               state["recording"] as? Bool != true, state["processing"] as? Bool != true,
