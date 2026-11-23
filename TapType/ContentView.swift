@@ -64,7 +64,7 @@ struct ContentView: View {
                             faq("Why does TapType open?", "The first tap starts a microphone session. Repeat taps stay in your keyboard while the session is ready. After the session expires, an interruption, or force-quitting TapType, it may need to open again.")
                             faq("Are transcripts saved?", "Completed originals are saved only on this iPhone, with local dates and times. History stays on this device. Earlier dictations cannot be recovered.")
                             faq("Why Full Access?", "It lets the keyboard exchange dictation commands and text with this app.")
-                            faq("How does cleanup work?", "Speech and writing models are separate choices. Cleanup removes fillers; Rewrite improves phrasing. If cleanup fails, your original words are kept.")
+                            faq("How does cleanup work?", "Speech and writing models are separate choices. Cleanup removes fillers; Rewrite improves phrasing. Style sets the tone: Formal, Casual, Very casual or Excited. If cleanup fails, your original words are kept.")
                         }.padding(.vertical, 8)
                     } label: { Text("Common questions") }
                 }

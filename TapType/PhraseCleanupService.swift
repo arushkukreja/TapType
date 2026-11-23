@@ -15,7 +15,7 @@ extension PhraseCleaning { func reset() async {} }
 /// Instructions shared by on-device and cloud cleanup. Small on-device models follow
 /// concrete rules and examples far better than a one-line request.
 enum CleanupInstructions {
-    static func text(_ mode: CleanupMode) -> String {
+    static func text(_ mode: CleanupMode, style: SpeakingStyle = .selected) -> String {
         let rules = """
         Rules for both:
         - Keep the speaker's meaning, names, numbers, dates, negations ("not", "don't") and every hedge ("maybe", "around", "I think", "I'm not sure").
@@ -32,7 +32,7 @@ enum CleanupInstructions {
         case .rewrite:
             return """
             You rewrite dictated speech so it reads like a clear, well-written message from the speaker.
-            Remove filler words (um, uh, like, you know, I mean, kind of, basically), false starts and repeated words. Fix grammar. Split or join sentences so they read naturally and say things concisely. Keep the speaker's voice and point of view (I, we, you).
+            Remove filler words (um, uh, like, you know, I mean, kind of, basically), false starts and repeated words. Fix grammar. Split or join sentences so they read naturally and say things concisely. Keep the speaker's voice and point of view (I, we, you).\(style.rewriteHint.isEmpty ? "" : "\n" + style.rewriteHint)
             \(rules)
 
             Examples:
@@ -69,18 +69,20 @@ actor FoundationPhraseCleaner: PhraseCleaning {
     static let shared = FoundationPhraseCleaner()
     private var session: LanguageModelSession?
     private var preparedMode: CleanupMode?
+    private var preparedStyle: SpeakingStyle?
     private var busy = false
     #if DEBUG
     private(set) var lastModelOutput = ""
     #endif
     func prepare(mode: CleanupMode) {
         guard !busy, mode != .original, SystemLanguageModel.default.isAvailable else { return }
-        if session != nil && preparedMode == mode { return }
+        let style = SpeakingStyle.selected
+        if session != nil && preparedMode == mode && preparedStyle == style { return }
         session = makeSession(mode)
         session?.prewarm(promptPrefix: Prompt("Input: "))
-        preparedMode = mode
+        preparedMode = mode; preparedStyle = style
     }
-    func reset() { if !busy { session = nil; preparedMode = nil } }
+    func reset() { if !busy { session = nil; preparedMode = nil; preparedStyle = nil } }
     private func makeSession(_ mode: CleanupMode) -> LanguageModelSession {
         LanguageModelSession(instructions: CleanupInstructions.text(mode))
     }

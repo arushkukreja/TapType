@@ -12,6 +12,91 @@ enum CleanupMode: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// How finished text should sound. Formatting (capitals, end punctuation) is applied by
+/// rule to the final text so it's reliable; Rewrite also asks the model for the tone.
+enum SpeakingStyle: String, CaseIterable, Identifiable, Sendable {
+    case natural, formal, casual, veryCasual, excited
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .natural: "As spoken"
+        case .formal: "Formal"
+        case .casual: "Casual"
+        case .veryCasual: "Very casual"
+        case .excited: "Excited"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .natural: "Keeps your tone. Normal capitals and punctuation."
+        case .formal: "Full sentences and punctuation. Good for email and work."
+        case .casual: "Relaxed, no period at the end. Good for messages."
+        case .veryCasual: "lowercase and light punctuation, like texting a friend"
+        case .excited: "Upbeat, ends with an exclamation point!"
+        }
+    }
+    static var selected: SpeakingStyle {
+        SpeakingStyle(rawValue: UserDefaults.standard.string(forKey: "speakingStyle") ?? "") ?? .natural
+    }
+    /// Extra guidance for Rewrite. Clean up keeps the speaker's words, so it gets none.
+    var rewriteHint: String {
+        switch self {
+        case .natural: ""
+        case .formal: "Use a polished, professional register: complete sentences, no slang, and spell out casual forms (gonna, wanna, yeah)."
+        case .casual: "Use a relaxed, friendly, conversational register with contractions."
+        case .veryCasual: "Use a very relaxed, texting register: short and informal, with contractions."
+        case .excited: "Use an upbeat, enthusiastic register, without adding new facts or words of praise the speaker didn't say."
+        }
+    }
+    /// Rule-based formatting for the finished text. Never adds or removes words, except
+    /// that Formal spells out a few casual contractions.
+    func apply(_ text: String) -> String {
+        var value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, self != .natural else { return value }
+        let endsWithPeriod = value.hasSuffix(".") && !value.hasSuffix("..")
+        switch self {
+        case .natural: break
+        case .formal:
+            for (casual, formal) in [("gonna", "going to"), ("wanna", "want to"), ("gotta", "have to"), ("kinda", "kind of"), ("sorta", "sort of")] {
+                value = value.replacingOccurrences(of: "\\b\(casual)\\b", with: formal, options: [.regularExpression, .caseInsensitive])
+            }
+            if let first = value.first, first.isLowercase { value = first.uppercased() + value.dropFirst() }
+            if let last = value.last, last.isLetter || last.isNumber { value += "." }
+        case .casual:
+            if endsWithPeriod { value.removeLast() }
+        case .veryCasual:
+            if endsWithPeriod { value.removeLast() }
+            value = Self.lowercasingSentenceStarts(value)
+        case .excited:
+            if endsWithPeriod { value.removeLast(); value += "!" }
+            else if let last = value.last, last.isLetter || last.isNumber { value += "!" }
+        }
+        return value
+    }
+    /// Lowercases the first word of each sentence, but keeps "I", its contractions, and
+    /// acronyms. Names elsewhere in a sentence are untouched.
+    private static func lowercasingSentenceStarts(_ text: String) -> String {
+        var result = "", atStart = true, word = ""
+        func flush() {
+            guard !word.isEmpty else { return }
+            let bare = word.replacingOccurrences(of: "’", with: "'")
+            let isI = bare == "I" || bare.hasPrefix("I'")
+            let letters = word.filter(\.isLetter)
+            let acronym = letters.count > 1 && letters.allSatisfy(\.isUppercase)
+            result += atStart && !isI && !acronym ? word.prefix(1).lowercased() + word.dropFirst() : word
+            atStart = false; word = ""
+        }
+        for character in text {
+            if character.isLetter || character == "'" || character == "’" { word.append(character); continue }
+            flush()
+            result.append(character)
+            if ".!?".contains(character) { atStart = true } else if character.isNumber { atStart = false }
+        }
+        flush()
+        return result
+    }
+}
+
 struct CleanupResult: Sendable {
     let text: String
     let notice: String?

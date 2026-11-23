@@ -6,6 +6,7 @@ struct ModelSettingsView: View {
     @AppStorage("speechProvider") private var speechProvider = "apple"
     @AppStorage("writingProvider") private var writingProvider = "apple"
     @AppStorage("cleanupMode") private var cleanupMode = CleanupMode.cleanup.rawValue
+    @AppStorage("speakingStyle") private var speakingStyle = SpeakingStyle.natural.rawValue
     @Binding var cloud: Bool
     @State private var configured = Set(CloudProvider.allCases.filter { (try? ProviderKeys.read($0)) != nil })
     let busy: Bool
@@ -21,6 +22,13 @@ struct ModelSettingsView: View {
                 ForEach(CleanupMode.allCases) { Text($0.title).tag($0.rawValue) }
             }
             if cleanupMode != "original" {
+                VStack(alignment: .leading, spacing: 4) {
+                    Picker("Style", selection: $speakingStyle) {
+                        ForEach(SpeakingStyle.allCases) { Text($0.title).tag($0.rawValue) }
+                    }
+                    Text((SpeakingStyle(rawValue: speakingStyle) ?? .natural).detail)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Picker("Writing", selection: $writingProvider) {
                     ForEach(WritingProvider.allCases.filter { $0.cloud.map { configured.contains($0) } ?? true }) { provider in
                         Text(provider.cloud?.writingModel ?? "Apple").tag(provider.rawValue)
