@@ -87,6 +87,28 @@ guarantees. Details are in [STREAMING-PERFORMANCE.md](outputs/STREAMING-PERFORMA
 - An Apple developer account for device signing
 - OpenAI or Groq API key (optional, for cloud models)
 
+## Web version
+
+`web/` holds a browser version of TapType: tap the mic (or press Space), speak,
+tap ✓, and the cleaned-up text is copied for you to paste anywhere. It's static
+files with no build step and uses the same cleanup rules and safety checks as the
+iOS app (`web/cleanup.js` is a port of `LocalTextProcessor.swift`).
+
+- **Speech:** the browser's own recognition (Chrome, Edge, Safari), or OpenAI / Groq
+  with your own key. Browser speech runs on-device only where the browser supports
+  it; otherwise it goes to the browser maker's speech service.
+- **Writing:** rules only (removes um, uh and stutters), Chrome's built-in on-device
+  AI, or OpenAI / Groq.
+- API keys and history are kept in the browser's local storage.
+
+Run it locally (microphone access needs `localhost` or HTTPS):
+
+```bash
+python3 -m http.server 4173 --directory web
+```
+
+Tests: `node --test web/cleanup.test.mjs`
+
 ## Build and install
 
 1. Clone the repository.
