@@ -38,7 +38,7 @@ struct ContentView: View {
                         .tint(.green)
                 } footer: {
                     Text(speech.readinessMinutes == 0 ? "Mic off after each dictation." : "Mic on while ready. Idle audio discarded.")
-                    if speech.reducesNoise { Text("Uses Apple’s voice processing to focus on your voice. Other audio may get quieter while the mic is on.") }
+                    if speech.reducesNoise { Text("Uses Apple’s voice processing to focus on your voice. It turns off while other audio is playing, so that audio keeps its normal volume.") }
                     if speech.showsLivePreview { Text("Shows your words in the keyboard as you speak. With downloaded models, Apple Speech shows them first.") }
                     if speech.voiceEditEnabled && !VoiceEditor.isAvailable { Text("Edit by voice needs Apple Intelligence, or a cloud writing model under Writing.") }
                     if let notice = speech.activityNotice { Text(notice) }

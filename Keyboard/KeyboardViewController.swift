@@ -34,7 +34,8 @@ private final class KeyboardReturnTargetResolver {
         repeat {
             if let bundle = currentHost(client: client, controller: controller) { return bundle }
             if ProcessInfo.processInfo.systemUptime >= deadline {
-                // Shortcut: iOS exposes only a PID here, so reuse is limited to eight seconds.
+                // iOS can report the Home Screen here while giving the host's PID; use the
+                // app learned for that PID while the keyboard was showing in it.
                 return returnTargets.bundle(for: snapshot.hostPID, now: ProcessInfo.processInfo.systemUptime)
             }
             try? await Task.sleep(for: .milliseconds(20))

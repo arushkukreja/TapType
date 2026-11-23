@@ -160,6 +160,8 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         guard preparation == preparationGeneration, !isStarting, !isRecording, !isProcessing else { return }
         if !sessionEnabled { await enableSession() }
         guard preparation == preparationGeneration, sessionEnabled, !isStarting, !isRecording, !isProcessing else { return }
+        matchVoiceProcessingToOtherAudio()
+        guard sessionEnabled else { return }
         isStarting = true; generation = UUID(); let epoch = generation
         transcriptID = requestID; errorMessage = nil; cleanupNotice = nil
         self.purpose = purpose; voiceEditOutcome = nil; isEditing = false
@@ -314,6 +316,9 @@ final class SpeechRecognizer: NSObject, ObservableObject {
             if isRecording { stop() } else { cancelDictation() }
         }
         if isRecording && originalTranscript.count > 100_000 { cleanupNotice = "This recording is full. Finish and start a new dictation."; stop() }
+        if sessionEnabled && !isRecording && !isStarting && !isProcessing && uptime - lastVoiceProcessingCheck >= 1 {
+            lastVoiceProcessingCheck = uptime; matchVoiceProcessingToOtherAudio()
+        }
         if sessionEnabled && !isRecording && !isStarting && !isProcessing && !readiness.isOpen(now: uptime) && (readiness.deadline != nil || Date() >= sessionExpiry) { releaseMicrophone() }
         let command = KeyboardBridge.read("command.json")
         if let id = command["id"] as? String, id != lastCommand {
@@ -513,9 +518,20 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         try audio.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker])
         try audio.setAllowHapticsAndSystemSoundsDuringRecording(true)
         try audio.setActive(true)
+        try configureInput()
+        engine.prepare()
+        try engine.start()
+    }
+    /// Voice processing is used only while no other audio is playing: with it on, iOS
+    /// plays other apps' music and videos through its call-volume path, which is much
+    /// louder than the media volume people set.
+    private var wantsVoiceProcessing: Bool { reducesNoise && !AVAudioSession.sharedInstance().isOtherAudioPlaying }
+    private var lastVoiceProcessingCheck = 0.0
+    private func configureInput() throws {
         let input = engine.inputNode
-        if input.isVoiceProcessingEnabled != reducesNoise { try input.setVoiceProcessingEnabled(reducesNoise) }
-        if reducesNoise {
+        let voiceProcessing = wantsVoiceProcessing
+        if input.isVoiceProcessingEnabled != voiceProcessing { try input.setVoiceProcessingEnabled(voiceProcessing) }
+        if voiceProcessing {
             input.isVoiceProcessingAGCEnabled = true
             // Keep other apps' audio as loud as possible while the mic is on.
             input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
@@ -528,8 +544,15 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         let sink = self.sink
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in sink.append(buffer) }
         tapInstalled = true
-        engine.prepare()
-        try engine.start()
+    }
+    /// While the mic is kept ready (never mid-dictation, whose audio format is fixed),
+    /// switch voice processing off when other audio starts and back on when it stops.
+    private func matchVoiceProcessingToOtherAudio() {
+        guard engine.isRunning, !isRecording, !isProcessing,
+              engine.inputNode.isVoiceProcessingEnabled != wantsVoiceProcessing else { return }
+        engine.stop()
+        do { try configureInput(); engine.prepare(); try engine.start() }
+        catch { releaseMicrophone() }
     }
     private func stopEngine() {
         engine.stop()
